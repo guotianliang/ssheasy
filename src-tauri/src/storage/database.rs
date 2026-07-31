@@ -16,6 +16,8 @@ impl Database {
 
     fn migrate(&self) -> Result<(), rusqlite::Error> {
         self.conn.execute_batch(include_str!("../../migrations/001_init.sql"))?;
+        self.conn
+            .execute_batch(include_str!("../../migrations/002_path_bookmarks.sql"))?;
         Ok(())
     }
 }

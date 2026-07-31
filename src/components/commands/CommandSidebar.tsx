@@ -5,6 +5,7 @@ import { terminalService } from "@/services/terminalService";
 import { CategorySection } from "./CategorySection";
 import { AddCommandModal } from "./AddCommandModal";
 import { TemplateVarInput } from "./TemplateVarInput";
+import { PathBookmarkPanel } from "./PathBookmarkPanel";
 import { parseTemplateVars } from "@/types/command";
 import type { CommandTemplate } from "@/types/command";
 
@@ -103,6 +104,9 @@ export function CommandSidebar() {
           </div>
         )}
       </div>
+
+      {/* 路径书签（按当前服务器） */}
+      <PathBookmarkPanel />
 
       {/* 底部提示 */}
       <div className="px-3 py-2.5 border-t border-[#1a1a24] flex-shrink-0 space-y-1">

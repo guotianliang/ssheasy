@@ -57,6 +57,9 @@ pub fn run() {
             commands::command_cmds::command_add,
             commands::command_cmds::command_update,
             commands::command_cmds::command_delete,
+            commands::path_bookmark_cmds::path_bookmark_list,
+            commands::path_bookmark_cmds::path_bookmark_add,
+            commands::path_bookmark_cmds::path_bookmark_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
