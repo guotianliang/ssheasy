@@ -18,7 +18,7 @@ export function CommandSidebar() {
   const [varModal, setVarModal] = useState<{ cmd: CommandTemplate; mode: "insert" | "execute" } | null>(null);
   const [noSessionHint, setNoSessionHint] = useState(false);
 
-  // 按分类分组 + 搜索过滤
+  // 按分类分组 + 搜索过滤；自定义命令的分组排在内置命令前面
   const grouped = useMemo(() => {
     const filtered = search
       ? commands.filter(
@@ -26,9 +26,22 @@ export function CommandSidebar() {
         )
       : commands;
 
-    return filtered.reduce<Record<string, CommandTemplate[]>>((acc, cmd) => {
+    const groups = filtered.reduce<Record<string, CommandTemplate[]>>((acc, cmd) => {
       if (!acc[cmd.category]) acc[cmd.category] = [];
       acc[cmd.category].push(cmd);
+      return acc;
+    }, {});
+
+    // 自定义命令分组排前面
+    const sortedKeys = Object.keys(groups).sort((a, b) => {
+      const aHasCustom = groups[a].some((c) => !c.isBuiltin);
+      const bHasCustom = groups[b].some((c) => !c.isBuiltin);
+      if (aHasCustom && !bHasCustom) return -1;
+      if (!aHasCustom && bHasCustom) return 1;
+      return 0;
+    });
+    return sortedKeys.reduce<Record<string, CommandTemplate[]>>((acc, key) => {
+      acc[key] = groups[key];
       return acc;
     }, {});
   }, [commands, search]);

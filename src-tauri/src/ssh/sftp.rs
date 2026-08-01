@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
+use std::path::Path as StdPath;
+
+use tokio::io::AsyncReadExt;
 
 use russh::client;
 use russh::keys::key::PrivateKeyWithHashAlg;
@@ -157,6 +160,66 @@ pub async fn home_dir(sftp: &SftpSession) -> Result<String, String> {
     sftp.canonicalize(".")
         .await
         .map_err(|e| format!("获取家目录失败: {}", e))
+}
+
+/// 读取文本文件内容（限制 10MB）
+pub async fn read_text_file(sftp: &SftpSession, path: &str) -> Result<FileContent, String> {
+    // 先取文件信息判断大小
+    let stat = sftp
+        .metadata(path)
+        .await
+        .map_err(|e| format!("获取文件信息失败: {}", e))?;
+
+    let size = stat.len();
+    if stat.file_type().is_dir() {
+        return Err("这是目录，不是文件".into());
+    }
+    if size > 10 * 1024 * 1024 {
+        return Err(format!("文件 {} MB 过大，请下载到本地查看", size / 1024 / 1024));
+    }
+
+    // 读取文件内容
+    let mut file = sftp
+        .open(path)
+        .await
+        .map_err(|e| format!("打开文件失败: {}", e))?;
+
+    let mut buf = Vec::with_capacity(size as usize);
+    file.read_to_end(&mut buf)
+        .await
+        .map_err(|e| format!("读取文件失败: {}", e))?;
+
+    let content = String::from_utf8_lossy(&buf).into_owned();
+    Ok(FileContent {
+        content,
+        size,
+        truncated: false,
+    })
+}
+
+/// 文件内容返回给前端
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileContent {
+    pub content: String,
+    pub size: u64,
+    pub truncated: bool,
+}
+
+/// 判断文件后缀是否为可预览的文本类型
+pub fn is_previewable(filename: &str) -> bool {
+    let ext = StdPath::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    matches!(
+        ext.as_str(),
+        "log" | "txt" | "conf" | "cfg" | "json" | "yaml" | "yml"
+            | "ini" | "env" | "md" | "csv" | "tsv" | "xml" | "sql"
+            | "sh" | "py" | "js" | "ts" | "go" | "rs" | "java" | "c"
+            | "cpp" | "h" | "properties" | "toml"
+    )
 }
 
 /// 将 unix 时间戳格式化为本地可读时间

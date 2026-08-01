@@ -1,4 +1,5 @@
 import { MutableRefObject } from "react";
+import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { ServerList } from "@/components/connection/ServerList";
 import { WorkspacePanel } from "@/components/layout/WorkspacePanel";
 import { CommandSidebar } from "@/components/commands/CommandSidebar";
@@ -35,23 +36,33 @@ export function AppShell({ outputHandlerRef }: AppShellProps) {
         </div>
       </header>
 
-      {/* 主体三栏 */}
-      <div className="flex flex-1 min-h-0">
+      {/* 主体三栏 — 可拖拽调宽 */}
+      <PanelGroup direction="horizontal" autoSaveId="ssheasy-layout" className="flex-1 min-h-0">
         {/* 左侧：服务器列表 */}
-        <aside className="w-52 flex-shrink-0 border-r border-border-subtle bg-surface flex flex-col">
-          <ServerList />
-        </aside>
+        <Panel defaultSize={18} minSize={12} maxSize={28}>
+          <aside className="h-full border-r border-border-subtle bg-surface flex flex-col">
+            <ServerList />
+          </aside>
+        </Panel>
+
+        <PanelResizeHandle className="w-px bg-border-subtle hover:bg-accent transition-colors duration-150 data-[resize-handle-state=drag]:bg-accent" />
 
         {/* 中间：终端 / 文件 双视图 */}
-        <main className="flex-1 flex flex-col min-w-0 bg-base">
-          <WorkspacePanel outputHandlerRef={outputHandlerRef} />
-        </main>
+        <Panel minSize={35}>
+          <main className="h-full flex flex-col min-w-0 bg-base">
+            <WorkspacePanel outputHandlerRef={outputHandlerRef} />
+          </main>
+        </Panel>
+
+        <PanelResizeHandle className="w-px bg-border-subtle hover:bg-accent transition-colors duration-150 data-[resize-handle-state=drag]:bg-accent" />
 
         {/* 右侧：命令面板 */}
-        <aside className="w-60 flex-shrink-0 border-l border-border-subtle bg-surface">
-          <CommandSidebar />
-        </aside>
-      </div>
+        <Panel defaultSize={22} minSize={14} maxSize={32}>
+          <aside className="h-full border-l border-border-subtle bg-surface">
+            <CommandSidebar />
+          </aside>
+        </Panel>
+      </PanelGroup>
     </div>
   );
 }

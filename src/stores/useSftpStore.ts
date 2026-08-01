@@ -8,7 +8,7 @@ export type WorkspaceView = "terminal" | "files" | "logs";
 interface SftpState {
   /** 当前主区域视图 */
   viewMode: WorkspaceView;
-  /** 已加载条目所属的 serverId，用于判断切换服务器时是否需要重新拉取 */
+  /** 已加载条目所属的 serverId */
   loadedServerId: string | null;
   /** 当前浏览路径 */
   currentPath: string;
@@ -18,15 +18,23 @@ interface SftpState {
   loading: boolean;
   error: string | null;
 
+  /** 文件预览 */
+  previewFile: FileEntry | null;
+  previewContent: string;
+  previewLoading: boolean;
+  previewError: string | null;
+
   setViewMode: (mode: WorkspaceView) => void;
   openPath: (serverId: string, path: string) => Promise<void>;
   goHome: (serverId: string) => Promise<void>;
   goUp: (serverId: string) => Promise<void>;
   refresh: (serverId: string) => Promise<void>;
   reset: () => void;
+
+  previewFile_: (serverId: string, file: FileEntry) => Promise<void>;
+  closePreview: () => void;
 }
 
-/** 计算上级目录，根目录返回 "/" */
 function parentOf(path: string): string {
   if (path === "/") return "/";
   const trimmed = path.replace(/\/+$/, "");
@@ -42,6 +50,11 @@ export const useSftpStore = create<SftpState>((set, get) => ({
   entries: [],
   loading: false,
   error: null,
+
+  previewFile: null,
+  previewContent: "",
+  previewLoading: false,
+  previewError: null,
 
   setViewMode: (mode) => set({ viewMode: mode }),
 
@@ -89,5 +102,21 @@ export const useSftpStore = create<SftpState>((set, get) => ({
       homePath: "",
       entries: [],
       error: null,
+      previewFile: null,
+      previewContent: "",
+      previewError: null,
     }),
+
+  previewFile_: async (serverId, file) => {
+    set({ previewLoading: true, previewError: null, previewFile: file, previewContent: "" });
+    try {
+      const result = await sftpService.readFile(serverId, file.path);
+      set({ previewContent: result.content, previewLoading: false });
+    } catch (e) {
+      set({ previewLoading: false, previewError: e instanceof Error ? e.message : String(e) });
+    }
+  },
+
+  closePreview: () =>
+    set({ previewFile: null, previewContent: "", previewError: null }),
 }));

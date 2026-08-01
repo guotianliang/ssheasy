@@ -3,7 +3,8 @@ import { useSftpStore } from "@/stores/useSftpStore";
 import { useTerminalStore } from "@/stores/useTerminalStore";
 import { usePathBookmarkStore } from "@/stores/usePathBookmarkStore";
 import { ViewSwitch } from "@/components/layout/ViewSwitch";
-import type { FileEntry } from "@/types/sftp";
+import { FilePreview } from "@/components/files/FilePreview";
+import { isPreviewable, type FileEntry } from "@/types/sftp";
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -44,6 +45,8 @@ export function FileBrowser() {
     refresh,
   } = useSftpStore();
   const addBookmark = usePathBookmarkStore((s) => s.addBookmark);
+  const previewFile_ = useSftpStore((s) => s.previewFile_);
+  const previewFile = useSftpStore((s) => s.previewFile);
 
   const [selected, setSelected] = useState<string | null>(null);
   const [justStarred, setJustStarred] = useState(false);
@@ -71,6 +74,14 @@ export function FileBrowser() {
       if (activeServerId) openPath(activeServerId, entry.path);
     } else {
       setSelected(entry.path);
+    }
+  };
+
+  // 双击文件：可预览的文本文件直接预览，其他提示
+  const handleEntryDoubleClick = (entry: FileEntry) => {
+    if (entry.isDir) return;
+    if (isPreviewable(entry.name) && activeServerId) {
+      previewFile_(activeServerId, entry);
     }
   };
 
@@ -184,11 +195,15 @@ export function FileBrowser() {
                 entry={entry}
                 selected={selected === entry.path}
                 onClick={() => handleEntryClick(entry)}
+                onDoubleClick={() => handleEntryDoubleClick(entry)}
               />
             ))}
           </>
         )}
       </div>
+
+      {/* 文件预览覆盖层 */}
+      {previewFile && <FilePreview />}
     </div>
   );
 }
@@ -225,10 +240,12 @@ function FileRow({
   entry,
   selected,
   onClick,
+  onDoubleClick,
 }: {
   entry: FileEntry;
   selected: boolean;
   onClick: () => void;
+  onDoubleClick: () => void;
 }) {
   return (
     <div
@@ -236,8 +253,8 @@ function FileRow({
         selected ? "bg-accent-soft" : "hover:bg-elevated"
       }`}
       onClick={onClick}
-      onDoubleClick={onClick}
-      title={entry.isDir ? `进入 ${entry.path}` : entry.path}
+      onDoubleClick={onDoubleClick}
+      title={entry.isDir ? `进入 ${entry.path}` : isPreviewable(entry.name) ? `双击预览 ${entry.path}` : entry.path}
     >
       <div className="flex items-center gap-2 flex-1 min-w-0">
         <FileIcon entry={entry} />
