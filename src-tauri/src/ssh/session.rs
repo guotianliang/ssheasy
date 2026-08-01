@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,12 +9,15 @@ use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::load_secret_key;
 use russh::Preferred;
 use russh::{kex, ChannelMsg, Disconnect};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
 use super::error_translate;
+use crate::events;
+use crate::ssh::hostkey::{self, HostKeyDecision};
 
 /// 构建兼容老服务器的算法配置（在默认列表末尾追加 legacy 算法）
-fn legacy_preferred() -> Preferred {
+pub fn legacy_preferred() -> Preferred {
     let mut default_kex: Vec<kex::Name> = Preferred::DEFAULT.kex.to_vec();
     // 追加老服务器常用的 KEX 算法
     default_kex.push(kex::DH_G14_SHA1);
@@ -27,7 +31,24 @@ fn legacy_preferred() -> Preferred {
 }
 
 /// SSH 客户端 Handler
-struct ClientHandler;
+pub struct ClientHandler {
+    pub app: Option<AppHandle>,
+    pub host: String,
+    pub port: u16,
+    /// 是否进行交互式 host key 校验（连接测试等场景为 false，直接接受）
+    pub interactive: bool,
+}
+
+impl ClientHandler {
+    pub fn new(app: AppHandle, host: String, port: u16, interactive: bool) -> Self {
+        Self {
+            app: Some(app),
+            host,
+            port,
+            interactive,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl client::Handler for ClientHandler {
@@ -35,10 +56,71 @@ impl client::Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &ssh_key::PublicKey,
+        server_public_key: &ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // Phase 1: 接受所有 host key，后续做 known_hosts 校验
-        Ok(true)
+        // 非交互场景（如连接测试）直接接受，不弹窗
+        if !self.interactive {
+            return Ok(true);
+        }
+
+        let key_str = server_public_key.to_string();
+        let fingerprint = server_public_key
+            .fingerprint(ssh_key::HashAlg::Sha256)
+            .to_string();
+        let host = self.host.clone();
+        let port = self.port;
+        let app = match &self.app {
+            Some(a) => a,
+            None => return Ok(true),
+        };
+
+        // 1) 已知且匹配 → 直接通过
+        if let hostkey::KnownStatus::Trusted =
+            hostkey::check(app, &host, port, &key_str)
+        {
+            return Ok(true);
+        }
+
+        let action = match hostkey::check(app, &host, port, &key_str) {
+            hostkey::KnownStatus::Changed => "changed",
+            _ => "new",
+        };
+
+        // 2) 询问前端：生成一次性 token，等待用户决策
+        let (tx, rx) = tokio::sync::oneshot::channel::<HostKeyDecision>();
+        let token = uuid::Uuid::new_v4().to_string();
+
+        if let Some(state) = app.try_state::<crate::AppState>() {
+            state.hostkey_pending.lock().await.insert(token.clone(), tx);
+            let _ = app.emit(
+                events::HOSTKEY_VERIFY,
+                serde_json::json!({
+                    "token": token,
+                    "host": host,
+                    "port": port,
+                    "fingerprint": fingerprint,
+                    "action": action,
+                }),
+            );
+        }
+
+        // 3) 等待决策（60s 超时 → 视为拒绝）
+        let decision = match tokio::time::timeout(Duration::from_secs(60), rx).await {
+            Ok(Ok(d)) => d,
+            _ => HostKeyDecision::Reject,
+        };
+
+        match decision {
+            HostKeyDecision::AcceptAndSave => {
+                let _ = hostkey::add(app, &host, port, &key_str);
+                Ok(true)
+            }
+            HostKeyDecision::AcceptOnce => Ok(true),
+            HostKeyDecision::Reject => Err(russh::Error::from(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "未信任该服务器的 SSH 指纹，连接已取消",
+            ))),
+        }
     }
 }
 
@@ -54,6 +136,30 @@ pub struct ConnectConfig {
     pub key_path: Option<String>,
     /// 加密私钥的解密密码（仅 auth_type = "key" 时使用）
     pub key_passphrase: Option<String>,
+}
+
+/// 从已存储的 Server 记录构建 ConnectConfig，凭据从 Keychain 读取。
+/// terminal 与 sftp 连接共用此逻辑，避免重复。
+pub fn build_config_from_server(
+    server: &crate::storage::server_repo::Server,
+) -> Result<ConnectConfig, String> {
+    let (password, key_passphrase) = if server.auth_type == "password" {
+        let pwd = crate::secret::keychain::get_password(&server.id)?;
+        (pwd, None)
+    } else {
+        let pass = crate::secret::keychain::get_key_passphrase(&server.id)?;
+        (None, pass)
+    };
+
+    Ok(ConnectConfig {
+        host: server.host.clone(),
+        port: server.port,
+        username: server.username.clone(),
+        auth_type: server.auth_type.clone(),
+        password,
+        key_path: server.key_path.clone(),
+        key_passphrase,
+    })
 }
 
 /// 活跃会话句柄：通过 mpsc 发送输入
@@ -81,7 +187,7 @@ impl SessionHandle {
 /// 加载私钥：优先用 russh 直接加载（OpenSSH / PKCS#8 / 无加密 PEM）；
 /// 若失败且文件是 OpenSSL 老式加密 PEM（`Proc-Type: 4,ENCRYPTED`），
 /// 回退到系统 `openssl` 命令解密到临时文件后再加载。
-fn load_key_with_legacy_fallback(
+pub fn load_key_with_legacy_fallback(
     key_path: &str,
     passphrase: Option<&str>,
 ) -> Result<russh::keys::PrivateKey, String> {
@@ -145,6 +251,10 @@ fn load_key_with_legacy_fallback(
                 });
             }
 
+            // 解密后的文件仅属主可读写
+            #[cfg(unix)]
+            let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
+
             // 4) 加载已解密的临时密钥（无密码）
             let result = load_secret_key(&tmp_path, None);
 
@@ -159,10 +269,12 @@ fn load_key_with_legacy_fallback(
 /// 建立 SSH 连接并启动 I/O 循环
 /// 返回 SessionHandle 用于后续交互
 pub async fn connect(
+    app: AppHandle,
     session_id: String,
     server_id: String,
     config: &ConnectConfig,
     output_tx: mpsc::UnboundedSender<String>,
+    interactive: bool,
 ) -> Result<SessionHandle, error_translate::TranslatedError> {
     let ssh_config = Arc::new(client::Config {
         inactivity_timeout: Some(Duration::from_secs(60)),
@@ -173,9 +285,13 @@ pub async fn connect(
     let addr = format!("{}:{}", config.host, config.port);
 
     // 建立 TCP + SSH 连接
-    let mut handle = client::connect(ssh_config, &addr, ClientHandler)
-        .await
-        .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
+    let mut handle = client::connect(
+        ssh_config,
+        &addr,
+        ClientHandler::new(app, config.host.clone(), config.port, interactive),
+    )
+    .await
+    .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
 
     // 认证
     let auth_ok = match config.auth_type.as_str() {

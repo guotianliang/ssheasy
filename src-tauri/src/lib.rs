@@ -5,7 +5,10 @@ pub mod ssh;
 pub mod storage;
 
 use storage::database::Database;
+use ssh::hostkey::HostKeyDecision;
 use ssh::manager::ConnectionManager;
+use ssh::sftp::SftpManager;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
@@ -13,6 +16,10 @@ use tokio::sync::Mutex;
 pub struct AppState {
     pub db: Arc<Mutex<Database>>,
     pub ssh_manager: Arc<Mutex<ConnectionManager>>,
+    pub sftp_manager: Arc<Mutex<SftpManager>>,
+    /// Host Key 验证待决表：token -> 前端决策通道
+    pub hostkey_pending:
+        Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<HostKeyDecision>>>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -38,6 +45,8 @@ pub fn run() {
             let state = AppState {
                 db: Arc::new(Mutex::new(db)),
                 ssh_manager: Arc::new(Mutex::new(ConnectionManager::new(app.handle().clone()))),
+                sftp_manager: Arc::new(Mutex::new(SftpManager::new(app.handle().clone()))),
+                hostkey_pending: Arc::new(Mutex::new(HashMap::new())),
             };
 
             app.manage(state);
@@ -49,6 +58,9 @@ pub fn run() {
             commands::server_cmds::server_update,
             commands::server_cmds::server_delete,
             commands::server_cmds::server_test,
+            commands::hostkey_cmds::host_key_decision,
+            commands::log_cmds::log_operation,
+            commands::log_cmds::list_logs,
             commands::terminal_cmds::terminal_connect,
             commands::terminal_cmds::terminal_input,
             commands::terminal_cmds::terminal_resize,
@@ -60,6 +72,9 @@ pub fn run() {
             commands::path_bookmark_cmds::path_bookmark_list,
             commands::path_bookmark_cmds::path_bookmark_add,
             commands::path_bookmark_cmds::path_bookmark_delete,
+            commands::sftp_cmds::sftp_list_dir,
+            commands::sftp_cmds::sftp_home,
+            commands::sftp_cmds::sftp_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

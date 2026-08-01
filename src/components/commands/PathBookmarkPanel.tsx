@@ -1,26 +1,23 @@
 import { useEffect, useState } from "react";
 import { usePathBookmarkStore } from "@/stores/usePathBookmarkStore";
 import { useTerminalStore } from "@/stores/useTerminalStore";
+import { useSftpStore } from "@/stores/useSftpStore";
 import { terminalService } from "@/services/terminalService";
 
-/**
- * 路径书签面板：按当前激活会话所属服务器展示收藏的目录，
- * 点击即在终端执行 `cd <路径>`，省去重复输入长路径。
- */
 export function PathBookmarkPanel() {
   const activeSessionId = useTerminalStore((s) => s.activeSessionId);
   const sessions = useTerminalStore((s) => s.sessions);
   const { bookmarks, loadedServerId, fetchBookmarks, addBookmark, deleteBookmark } =
     usePathBookmarkStore();
+  const viewMode = useSftpStore((s) => s.viewMode);
+  const openPath = useSftpStore((s) => s.openPath);
 
   const [showAdd, setShowAdd] = useState(false);
   const [pathInput, setPathInput] = useState("");
   const [labelInput, setLabelInput] = useState("");
 
-  // 当前激活会话对应的 serverId
   const activeServerId = sessions.find((s) => s.sessionId === activeSessionId)?.serverId ?? null;
 
-  // 切换会话时按需拉取该服务器的书签
   useEffect(() => {
     if (activeServerId && activeServerId !== loadedServerId) {
       fetchBookmarks(activeServerId);
@@ -28,8 +25,12 @@ export function PathBookmarkPanel() {
   }, [activeServerId, loadedServerId, fetchBookmarks]);
 
   const handleJump = (path: string) => {
-    if (!activeSessionId) return;
-    terminalService.sendInput(activeSessionId, `cd ${path}\n`);
+    if (!activeServerId) return;
+    if (viewMode === "files") {
+      openPath(activeServerId, path);
+    } else if (activeSessionId) {
+      terminalService.sendInput(activeSessionId, `cd ${path}\n`);
+    }
   };
 
   const handleAdd = async () => {
@@ -45,21 +46,20 @@ export function PathBookmarkPanel() {
     setShowAdd(false);
   };
 
-  // 未连接时不显示
   if (!activeServerId) return null;
 
   const inputClass =
-    "w-full px-2.5 py-1.5 rounded-md text-[11px] text-gray-200 outline-none focus:border-indigo-500 transition-colors bg-[#0a0a0f] border border-[#1e1e2a]";
+    "w-full px-2.5 py-1.5 rounded-md text-helper text-primary outline-none placeholder-tertiary bg-base border border-border-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all duration-150";
 
   return (
-    <div className="border-t border-[#1a1a24] flex-shrink-0">
+    <div className="border-t border-border-subtle flex-shrink-0">
       {/* 头部 */}
       <div className="flex items-center justify-between px-3 pt-2 pb-1">
-        <span className="text-[10px] font-medium text-gray-500 uppercase tracking-wide">
+        <span className="text-label font-medium text-tertiary uppercase tracking-wide">
           路径书签
         </span>
         <button
-          className="w-4 h-4 rounded flex items-center justify-center text-gray-600 hover:text-indigo-400 hover:bg-indigo-500/10 transition-all"
+          className="w-4 h-4 rounded flex items-center justify-center text-disabled hover:text-accent hover:bg-accent-soft transition-all"
           onClick={() => setShowAdd((v) => !v)}
           title="收藏当前路径"
         >
@@ -89,14 +89,14 @@ export function PathBookmarkPanel() {
           />
           <div className="flex gap-1.5">
             <button
-              className="flex-1 py-1 rounded text-[10px] text-gray-400 bg-[#2a2a3a] hover:text-gray-200 transition-colors"
+              className="flex-1 py-1 rounded text-label text-tertiary bg-elevated border border-border-subtle hover:text-secondary transition-colors"
               onClick={() => setShowAdd(false)}
             >
               取消
             </button>
             <button
-              className="flex-1 py-1 rounded text-[10px] font-medium text-white transition-colors disabled:opacity-40"
-              style={{ background: pathInput.trim() ? "#6366f1" : "#333" }}
+              className="flex-1 py-1 rounded text-label font-medium text-white transition-colors disabled:opacity-40"
+              style={{ background: pathInput.trim() ? "var(--accent)" : "var(--border-subtle)" }}
               disabled={!pathInput.trim()}
               onClick={handleAdd}
             >
@@ -111,26 +111,26 @@ export function PathBookmarkPanel() {
         {bookmarks.map((bm) => (
           <div
             key={bm.id}
-            className="group flex items-center gap-1.5 px-2 py-1.5 rounded-md cursor-pointer hover:bg-indigo-500/10 transition-colors"
+            className="group flex items-center gap-1.5 px-2 py-1.5 rounded-md cursor-pointer hover:bg-accent-soft transition-colors duration-150"
             onClick={() => handleJump(bm.path)}
             title={`cd ${bm.path}`}
           >
             <svg width="11" height="11" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
               <path
                 d="M1.5 4C1.5 3.17 2.17 2.5 3 2.5H6L7.5 4.5H13C13.83 4.5 14.5 5.17 14.5 6V11.5C14.5 12.33 13.83 13 13 13H3C2.17 13 1.5 12.33 1.5 11.5V4Z"
-                stroke="#7c7c96"
+                stroke="var(--text-tertiary)"
                 strokeWidth="1.1"
                 strokeLinejoin="round"
               />
             </svg>
             <div className="flex-1 min-w-0">
               {bm.label && (
-                <div className="text-[11px] text-gray-300 truncate leading-tight">{bm.label}</div>
+                <div className="text-helper text-primary truncate leading-tight">{bm.label}</div>
               )}
-              <div className="text-[10px] text-gray-600 font-mono truncate">{bm.path}</div>
+              <div className="text-label text-disabled font-mono truncate">{bm.path}</div>
             </div>
             <button
-              className="opacity-0 group-hover:opacity-100 text-gray-700 hover:text-red-400 transition-all p-0.5 flex-shrink-0"
+              className="opacity-0 group-hover:opacity-100 text-disabled hover:text-danger transition-all p-0.5 flex-shrink-0"
               onClick={(e) => {
                 e.stopPropagation();
                 deleteBookmark(bm.id);
@@ -144,7 +144,7 @@ export function PathBookmarkPanel() {
           </div>
         ))}
         {bookmarks.length === 0 && !showAdd && (
-          <div className="text-center text-[10px] text-gray-700 py-2">
+          <div className="text-center text-label text-disabled py-2">
             点 + 收藏常用目录，点击即可 cd 进入
           </div>
         )}

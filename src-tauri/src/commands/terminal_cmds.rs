@@ -1,7 +1,6 @@
 use tauri::State;
 
-use crate::secret::keychain;
-use crate::ssh::session::ConnectConfig;
+use crate::ssh::session::build_config_from_server;
 use crate::AppState;
 
 #[tauri::command]
@@ -9,7 +8,7 @@ pub async fn terminal_connect(
     state: State<'_, AppState>,
     server_id: String,
 ) -> Result<String, serde_json::Value> {
-    // 从数据库获取服务器配置
+    // 从数据库 + Keychain 构建连接配置
     let config = {
         let db = state.db.lock().await;
         let server = db
@@ -17,26 +16,7 @@ pub async fn terminal_connect(
             .map_err(|e| serde_json::json!({ "error": e.to_string() }))?
             .ok_or_else(|| serde_json::json!({ "error": "服务器不存在" }))?;
 
-        // 从 Keychain 获取密码 / 私钥 passphrase
-        let (password, key_passphrase) = if server.auth_type == "password" {
-            let pwd = keychain::get_password(&server_id)
-                .map_err(|e| serde_json::json!({ "error": e }))?;
-            (pwd, None)
-        } else {
-            let pass = keychain::get_key_passphrase(&server_id)
-                .map_err(|e| serde_json::json!({ "error": e }))?;
-            (None, pass)
-        };
-
-        ConnectConfig {
-            host: server.host,
-            port: server.port,
-            username: server.username,
-            auth_type: server.auth_type,
-            password,
-            key_path: server.key_path,
-            key_passphrase,
-        }
+        build_config_from_server(&server).map_err(|e| serde_json::json!({ "error": e }))?
     };
 
     // 建立连接

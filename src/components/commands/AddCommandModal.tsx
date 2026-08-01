@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useCommandStore } from "@/stores/useCommandStore";
 
 export function AddCommandModal({ onClose }: { onClose: () => void }) {
@@ -13,15 +13,29 @@ export function AddCommandModal({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
-  const inputClass = "w-full px-3 py-2 rounded-lg text-xs text-gray-200 outline-none focus:border-indigo-500 transition-colors bg-[#0d0d14] border border-[#333]";
+  // Esc 关闭
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+      if (e.key === "Enter" && cmd.trim()) handleSave();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [cmd, description, category]);
+
+  const inputClass =
+    "w-full px-3 py-2 rounded-lg text-helper text-primary outline-none placeholder-tertiary bg-base border border-border-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all duration-150";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="w-80 rounded-xl p-5 shadow-2xl bg-[#1e1e2e] border border-[#333]">
-        <h3 className="text-sm font-semibold text-gray-200 mb-4">添加自定义命令</h3>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px] animate-fade-in"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div className="w-80 rounded-xl p-5 shadow-2xl bg-surface border border-border-subtle animate-slide-in">
+        <h3 className="text-title font-medium text-primary mb-4">添加自定义命令</h3>
         <div className="space-y-3">
           <div>
-            <label className="text-[11px] text-gray-500 mb-1 block">命令 *</label>
+            <label className="text-label text-tertiary mb-1 block">命令 *</label>
             <input
               className={`${inputClass} font-mono`}
               placeholder="docker logs -f {{容器名}}"
@@ -29,26 +43,40 @@ export function AddCommandModal({ onClose }: { onClose: () => void }) {
               onChange={(e) => setCmd(e.target.value)}
               autoFocus
             />
-            <div className="text-[10px] text-gray-600 mt-1">
+            <div className="text-label text-disabled mt-1">
               用 {"{{变量名}}"} 标记需要填写的参数
             </div>
           </div>
           <div>
-            <label className="text-[11px] text-gray-500 mb-1 block">说明</label>
-            <input className={inputClass} placeholder="查看容器实时日志" value={description} onChange={(e) => setDescription(e.target.value)} />
+            <label className="text-label text-tertiary mb-1 block">说明</label>
+            <input
+              className={inputClass}
+              placeholder="查看容器实时日志"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
           </div>
           <div>
-            <label className="text-[11px] text-gray-500 mb-1 block">分组</label>
-            <input className={inputClass} placeholder="自定义命令" value={category} onChange={(e) => setCategory(e.target.value)} />
+            <label className="text-label text-tertiary mb-1 block">分组</label>
+            <input
+              className={inputClass}
+              placeholder="自定义命令"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            />
           </div>
         </div>
         <div className="flex gap-2 mt-5">
-          <button className="flex-1 py-2 rounded-lg text-xs text-gray-400 bg-[#2a2a3a] hover:text-gray-200" onClick={onClose}>
+          <button
+            className="flex-1 py-2 rounded-lg text-helper text-secondary bg-elevated border border-border-subtle hover:text-primary transition-colors"
+            onClick={onClose}
+          >
             取消
           </button>
           <button
-            className="flex-1 py-2 rounded-lg text-xs font-medium text-white transition-colors"
-            style={{ background: cmd.trim() ? "#6366f1" : "#333" }}
+            className="flex-1 py-2 rounded-lg text-helper font-medium text-white bg-accent hover:bg-accent-hover transition-colors"
+            style={{ opacity: cmd.trim() ? 1 : 0.4 }}
+            disabled={!cmd.trim()}
             onClick={handleSave}
           >
             保存

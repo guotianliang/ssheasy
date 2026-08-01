@@ -1,6 +1,7 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useCommandStore } from "@/stores/useCommandStore";
 import { useTerminalStore } from "@/stores/useTerminalStore";
+import { useLogStore } from "@/stores/useLogStore";
 import { terminalService } from "@/services/terminalService";
 import { CategorySection } from "./CategorySection";
 import { AddCommandModal } from "./AddCommandModal";
@@ -50,18 +51,41 @@ export function CommandSidebar() {
     }
     if (mode === "execute") {
       terminalService.sendInput(activeSessionId, renderedCmd + "\n");
+      const serverId = useTerminalStore
+        .getState()
+        .sessions.find((s) => s.sessionId === activeSessionId)?.serverId;
+      if (serverId) {
+        useLogStore.getState().record(serverId, renderedCmd);
+      }
     } else {
       terminalService.sendInput(activeSessionId, renderedCmd);
     }
   };
 
+  // Cmd+K 聚焦搜索框
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        const input = document.querySelector<HTMLInputElement>("[data-cmd-search]");
+        input?.focus();
+        input?.select();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const inputClass =
+    "w-full pl-7 pr-2.5 py-1.5 rounded-md text-helper text-primary outline-none placeholder-tertiary bg-base border border-border-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all duration-150";
+
   return (
     <div className="flex flex-col h-full">
       {/* 头部 */}
-      <div className="flex items-center justify-between px-3 h-10 border-b border-[#1a1a24] flex-shrink-0">
-        <span className="text-[11px] font-medium text-gray-400 uppercase tracking-wide">快捷命令</span>
+      <div className="flex items-center justify-between px-3 h-10 border-b border-border-subtle flex-shrink-0">
+        <span className="text-helper font-medium text-secondary uppercase tracking-wide">快捷命令</span>
         <button
-          className="w-5 h-5 rounded flex items-center justify-center text-gray-600 hover:text-indigo-400 hover:bg-indigo-500/10 transition-all duration-150"
+          className="w-5 h-5 rounded flex items-center justify-center text-tertiary hover:text-accent hover:bg-accent-soft transition-all duration-150"
           onClick={() => setShowAdd(true)}
           title="添加自定义命令"
         >
@@ -74,15 +98,16 @@ export function CommandSidebar() {
       {/* 搜索框 */}
       <div className="px-2.5 py-2 flex-shrink-0">
         <div className="relative">
-          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600" width="11" height="11" viewBox="0 0 12 12" fill="none">
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" width="11" height="11" viewBox="0 0 12 12" fill="none">
             <circle cx="5" cy="5" r="3.5" stroke="currentColor" strokeWidth="1.2" />
             <path d="M8 8L11 11" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
           </svg>
           <input
-            className="w-full pl-7 pr-2.5 py-1.5 rounded-md text-[11px] text-gray-300 outline-none placeholder-gray-600 bg-[#0a0a0f] border border-[#1e1e2a] focus:border-indigo-500/50 focus:bg-[#0d0d14] transition-all duration-150"
-            placeholder="搜索命令..."
+            className={inputClass}
+            placeholder="搜索命令... (⌘K)"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            data-cmd-search
           />
         </div>
       </div>
@@ -99,34 +124,34 @@ export function CommandSidebar() {
           />
         ))}
         {Object.keys(grouped).length === 0 && (
-          <div className="text-center text-[11px] text-gray-600 py-8">
+          <div className="text-center text-helper text-tertiary py-8">
             {search ? "没有匹配的命令" : "暂无命令"}
           </div>
         )}
       </div>
 
-      {/* 路径书签（按当前服务器） */}
+      {/* 路径书签 */}
       <PathBookmarkPanel />
 
       {/* 底部提示 */}
-      <div className="px-3 py-2.5 border-t border-[#1a1a24] flex-shrink-0 space-y-1">
+      <div className="px-3 py-2.5 border-t border-border-subtle flex-shrink-0 space-y-1">
         {noSessionHint && (
-          <div className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1 animate-fade-in">
+          <div className="text-label text-warning bg-warning-soft border border-warning/20 rounded px-2 py-1 animate-fade-in">
             请先在左侧选择服务器并连接
           </div>
         )}
-        <div className="flex items-center gap-3 text-[9px] text-gray-600">
+        <div className="flex items-center gap-3 text-label text-disabled">
           <span className="flex items-center gap-1">
-            <span className="inline-block w-3 h-3 rounded bg-[#1a1a24] text-center leading-3 text-[8px] text-gray-500">↵</span>
+            <span className="inline-block w-3 h-3 rounded bg-elevated text-center leading-3 text-[8px] text-tertiary">↵</span>
             填入终端
           </span>
           <span className="flex items-center gap-1">
-            <span className="inline-block w-3 h-3 rounded bg-emerald-500/10 text-center leading-3 text-[8px] text-emerald-500">▶</span>
+            <span className="inline-block w-3 h-3 rounded bg-success-soft text-center leading-3 text-[8px] text-success">▶</span>
             直接执行
           </span>
         </div>
         {!activeSessionId && (
-          <div className="text-[9px] text-yellow-600/80">未连接服务器，命令无法执行</div>
+          <div className="text-label text-warning/80">未连接服务器，命令无法执行</div>
         )}
       </div>
 

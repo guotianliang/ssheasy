@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { EVENTS } from "@/types/events";
 import type { TerminalOutputEvent, ConnectionStatusEvent } from "@/types/terminal";
+import type { HostKeyVerifyEvent } from "@/types/hostkey";
 import { useServerStore } from "@/stores/useServerStore";
 import { useTerminalStore } from "@/stores/useTerminalStore";
 
@@ -10,7 +11,8 @@ import { useTerminalStore } from "@/stores/useTerminalStore";
  * 在 App 根组件中调用一次
  */
 export function useSSHEvents(
-  onTerminalOutput: (event: TerminalOutputEvent) => void
+  onTerminalOutput: (event: TerminalOutputEvent) => void,
+  onHostKeyVerify?: (event: HostKeyVerifyEvent) => void
 ) {
   const setConnectionStatus = useServerStore((s) => s.setConnectionStatus);
 
@@ -38,8 +40,17 @@ export function useSSHEvents(
       })
     );
 
+    // Host Key 验证询问（弹窗让用户确认指纹）
+    if (onHostKeyVerify) {
+      unlisteners.push(
+        listen<HostKeyVerifyEvent>(EVENTS.HOSTKEY_VERIFY, (event) => {
+          onHostKeyVerify(event.payload);
+        })
+      );
+    }
+
     return () => {
       unlisteners.forEach((p) => p.then((unlisten) => unlisten()));
     };
-  }, [onTerminalOutput, setConnectionStatus]);
+  }, [onTerminalOutput, onHostKeyVerify, setConnectionStatus]);
 }

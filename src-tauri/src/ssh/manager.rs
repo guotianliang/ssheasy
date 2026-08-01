@@ -32,10 +32,12 @@ impl ConnectionManager {
 
         // 建立连接（内部会 spawn I/O task）
         let handle = session::connect(
+            self.app_handle.clone(),
             session_id.clone(),
             server_id.to_string(),
             config,
             output_tx,
+            true,
         )
         .await?;
 

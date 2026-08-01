@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::secret::keychain;
 use crate::ssh::session::ConnectConfig;
@@ -76,6 +76,7 @@ pub async fn server_delete(state: State<'_, AppState>, id: String) -> Result<(),
 
 #[tauri::command]
 pub async fn server_test(
+    app: AppHandle,
     _state: State<'_, AppState>,
     input: ServerInput,
     password: Option<String>,
@@ -96,11 +97,14 @@ pub async fn server_test(
     let (output_tx, _output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // 尝试连接，成功则立即断开
+    // 连接测试场景 interactive=false：不弹 Host Key 确认框，未知指纹直接接受
     match crate::ssh::session::connect(
+        app,
         "test".to_string(),
         "test".to_string(),
         &config,
         output_tx,
+        false,
     )
     .await
     {

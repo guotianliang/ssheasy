@@ -15,7 +15,7 @@ export function CategorySection({ name, commands, onCommand, onDelete }: Categor
   return (
     <div>
       <button
-        className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left rounded-md hover:bg-white/5 transition-colors"
+        className="w-full flex items-center gap-1.5 px-2 py-1.5 text-left rounded-md hover:bg-elevated transition-colors duration-150"
         onClick={() => setOpen(!open)}
       >
         <svg
@@ -23,13 +23,13 @@ export function CategorySection({ name, commands, onCommand, onDelete }: Categor
           height="10"
           viewBox="0 0 10 10"
           fill="none"
-          className="transition-transform duration-200"
+          className="transition-transform duration-200 text-tertiary"
           style={{ transform: open ? "rotate(90deg)" : "rotate(0deg)" }}
         >
-          <path d="M3 1L8 5L3 9V1Z" fill="#6b7280" />
+          <path d="M3 1L8 5L3 9V1Z" fill="currentColor" />
         </svg>
-        <span className="text-xs font-medium text-gray-400">{name}</span>
-        <span className="ml-auto text-[10px] text-gray-600">{commands.length}</span>
+        <span className="text-helper font-medium text-secondary">{name}</span>
+        <span className="ml-auto text-label text-disabled">{commands.length}</span>
       </button>
       {open && (
         <div className="ml-1 mt-0.5 space-y-0.5">

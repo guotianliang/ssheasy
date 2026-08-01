@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useServerStore } from "@/stores/useServerStore";
 import { serverService } from "@/services/serverService";
 import type { Server, ServerInput, TestResult } from "@/types/server";
+import { isValidHost } from "@/types/server";
 import { ErrorGuide } from "./ErrorGuide";
 
 interface ServerFormModalProps {
@@ -19,6 +20,21 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  /** 前端校验，返回错误文案；无错误返回 null。与后端 validate_server_input 保持一致。 */
+  const validateForm = (): string | null => {
+    const name = form.name.trim();
+    const host = form.host.trim();
+    if (!name && !host) return "请填写服务器名称或主机地址";
+    if (!host) return "请填写主机地址（IP 或域名）";
+    if (!isValidHost(host)) return "主机地址格式不正确（应为 IPv4/IPv6 或合法域名）";
+    const port = parseInt(form.port);
+    if (isNaN(port) || port < 1 || port > 65535) return "端口号需在 1-65535 之间";
+    if (form.authType === "key" && !form.keyPath.trim())
+      return "使用密钥认证时必须填写私钥路径";
+    return null;
+  };
 
   const [form, setForm] = useState({
     name: server?.name ?? "",
@@ -49,8 +65,14 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
     form.authType === "key" && form.keyPassphrase ? form.keyPassphrase : undefined;
 
   const handleTest = async () => {
+    const err = validateForm();
+    if (err) {
+      setFormError(err);
+      return;
+    }
     setTesting(true);
     setTestResult(null);
+    setFormError(null);
     try {
       const result = await serverService.test(
         buildInput(),
@@ -70,7 +92,13 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
   };
 
   const handleSave = async () => {
+    const err = validateForm();
+    if (err) {
+      setFormError(err);
+      return;
+    }
     setSaving(true);
+    setFormError(null);
     try {
       if (isEdit && server) {
         await updateServer(server.id, buildInput(), passwordPayload(), passphrasePayload());
@@ -85,15 +113,39 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
     }
   };
 
+  // Esc 关闭
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Enter 提交（在 step 1 时触发测试连接）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Enter" && !testing && !saving) {
+        if (step === 1 && form.host) handleTest();
+        else if (step === 2) handleSave();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [step, form, testing, saving]);
+
   const inputClass =
-    "w-full px-3 py-2 rounded-lg text-xs text-gray-200 outline-none focus:border-indigo-500 transition-colors bg-[#0d0d14] border border-[#252530]";
-  const labelClass = "text-[11px] text-gray-500 mb-1 block";
-  const hintClass = "text-[10px] text-gray-600 mt-1";
+    "w-full px-3 py-2 rounded-lg text-helper text-primary outline-none placeholder-tertiary bg-base border border-border-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all duration-150";
+  const labelClass = "text-label text-tertiary mb-1 block";
+  const hintClass = "text-label text-disabled mt-1";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="w-96 rounded-xl p-5 shadow-2xl bg-[#1e1e2e] border border-[#333]">
-        <h3 className="text-sm font-semibold text-gray-200 mb-4">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px] animate-fade-in"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div className="w-96 rounded-xl p-5 shadow-2xl bg-surface border border-border-subtle animate-slide-in">
+        <h3 className="text-title font-medium text-primary mb-4">
           {step === 2 ? "连接成功" : isEdit ? "编辑服务器" : "添加服务器"}
         </h3>
 
@@ -141,20 +193,20 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
               <label className={labelClass}>登录方式</label>
               <div className="flex gap-2">
                 <button
-                  className={`flex-1 py-1.5 rounded-lg text-xs transition-colors ${
+                  className={`flex-1 py-1.5 rounded-lg text-helper transition-all duration-150 ${
                     form.authType === "password"
-                      ? "bg-indigo-600 text-white"
-                      : "bg-[#2a2a3a] text-gray-400"
+                      ? "bg-accent text-white"
+                      : "bg-elevated text-tertiary hover:text-secondary"
                   }`}
                   onClick={() => setForm({ ...form, authType: "password" })}
                 >
                   密码
                 </button>
                 <button
-                  className={`flex-1 py-1.5 rounded-lg text-xs transition-colors ${
+                  className={`flex-1 py-1.5 rounded-lg text-helper transition-all duration-150 ${
                     form.authType === "key"
-                      ? "bg-indigo-600 text-white"
-                      : "bg-[#2a2a3a] text-gray-400"
+                      ? "bg-accent text-white"
+                      : "bg-elevated text-tertiary hover:text-secondary"
                   }`}
                   onClick={() => setForm({ ...form, authType: "key" })}
                 >
@@ -208,6 +260,13 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
               />
             </div>
 
+            {/* 表单校验错误 */}
+            {formError && (
+              <div className="text-label text-danger bg-danger-soft border border-danger/20 rounded-md px-2.5 py-1.5 animate-fade-in">
+                {formError}
+              </div>
+            )}
+
             {/* 错误引导 */}
             {testResult && !testResult.success && testResult.error && (
               <ErrorGuide error={testResult.error} />
@@ -215,13 +274,13 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
 
             <div className="flex gap-2 pt-2">
               <button
-                className="flex-1 py-2 rounded-lg text-xs text-gray-400 bg-[#2a2a3a] hover:text-gray-200 transition-colors"
+                className="flex-1 py-2 rounded-lg text-helper text-secondary bg-elevated border border-border-subtle hover:text-primary transition-colors"
                 onClick={onClose}
               >
                 取消
               </button>
               <button
-                className="flex-1 py-2 rounded-lg text-xs text-gray-300 bg-[#2a2a3a] hover:bg-[#34344a] transition-colors disabled:opacity-40"
+                className="flex-1 py-2 rounded-lg text-helper text-secondary bg-elevated border border-border-subtle hover:text-primary transition-colors disabled:opacity-40"
                 disabled={!form.host || saving}
                 onClick={handleSave}
                 title="跳过测试直接保存"
@@ -229,8 +288,7 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
                 {saving ? "保存中..." : "直接保存"}
               </button>
               <button
-                className="flex-1 py-2 rounded-lg text-xs font-medium text-white transition-colors disabled:opacity-40"
-                style={{ background: form.host ? "#6366f1" : "#333" }}
+                className="flex-1 py-2 rounded-lg text-helper font-medium text-white bg-accent hover:bg-accent-hover transition-colors disabled:opacity-40"
                 disabled={!form.host || testing}
                 onClick={handleTest}
               >
@@ -241,18 +299,22 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
         )}
 
         {step === 2 && (
-          <div className="text-center py-4">
-            <div className="text-green-400 text-2xl mb-2">✓</div>
-            <div className="text-xs text-gray-400 mb-4">连接测试通过，保存后即可使用</div>
+          <div className="text-center py-4 animate-fade-in">
+            <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-success-soft border border-success/20 flex items-center justify-center">
+              <svg width="20" height="20" viewBox="0 0 16 16" fill="none">
+                <path d="M3 8L6.5 11.5L13 4.5" stroke="var(--success)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
+            <div className="text-helper text-secondary mb-4">连接测试通过，保存后即可使用</div>
             <div className="flex gap-2">
               <button
-                className="flex-1 py-2 rounded-lg text-xs text-gray-400 bg-[#2a2a3a]"
+                className="flex-1 py-2 rounded-lg text-helper text-secondary bg-elevated border border-border-subtle hover:text-primary transition-colors"
                 onClick={() => setStep(1)}
               >
                 返回修改
               </button>
               <button
-                className="flex-1 py-2 rounded-lg text-xs font-medium text-white bg-green-600 hover:bg-green-500 disabled:opacity-40"
+                className="flex-1 py-2 rounded-lg text-helper font-medium text-white bg-accent hover:bg-accent-hover transition-colors disabled:opacity-40"
                 disabled={saving}
                 onClick={handleSave}
               >
