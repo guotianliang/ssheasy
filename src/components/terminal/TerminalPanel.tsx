@@ -132,7 +132,17 @@ export function TerminalPanel({ outputHandlerRef }: TerminalPanelProps) {
 
   const handleOutput = useCallback((event: TerminalOutputEvent) => {
     const inst = instancesRef.current.get(event.sessionId);
-    if (inst) {
+    if (!inst) return;
+    try {
+      // 后端发来 base64 编码的原始字节 → 解码为 Uint8Array 写入 xterm
+      const binary = atob(event.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      inst.terminal.write(bytes);
+    } catch {
+      // base64 解码失败时降级为原样字符串写入，避免终端崩溃
       inst.terminal.write(event.data);
     }
   }, []);

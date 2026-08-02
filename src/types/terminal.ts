@@ -1,5 +1,6 @@
 export interface TerminalOutputEvent {
   sessionId: string;
+  /** base64 编码的原始字节（xterm 直接写入，避免多字节字符截断乱码） */
   data: string;
 }
 

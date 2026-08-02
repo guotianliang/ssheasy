@@ -4,12 +4,16 @@ use std::time::{Duration, UNIX_EPOCH};
 use std::path::Path as StdPath;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::fs::File as LocalFile;
 
 use russh::client;
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
-use tauri::AppHandle;
+use serde_json::json;
+use tauri::{AppHandle, Emitter};
+
+use crate::events;
 
 use super::session::{legacy_preferred, load_key_with_legacy_fallback, ClientHandler, ConnectConfig};
 
@@ -27,38 +31,46 @@ pub struct FileEntry {
 }
 
 /// SFTP 连接池：按 server_id 缓存会话，懒加载
+/// sessions 使用内部 Mutex：建连在锁外进行，避免一个文件操作阻塞其他操作
 pub struct SftpManager {
     app: AppHandle,
-    sessions: HashMap<String, Arc<SftpSession>>,
+    sessions: tokio::sync::Mutex<HashMap<String, Arc<SftpSession>>>,
 }
 
 impl SftpManager {
     pub fn new(app: AppHandle) -> Self {
         Self {
             app,
-            sessions: HashMap::new(),
+            sessions: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 
     /// 获取（或建立）某服务器的 SFTP 会话
     pub async fn session(
-        &mut self,
+        &self,
         server_id: &str,
         config: &ConnectConfig,
     ) -> Result<Arc<SftpSession>, String> {
-        if let Some(existing) = self.sessions.get(server_id) {
+        // 先查缓存（短锁）
+        if let Some(existing) = self.sessions.lock().await.get(server_id) {
             return Ok(existing.clone());
         }
 
+        // 锁外建立连接
         let sftp = Self::connect(self.app.clone(), config).await?;
         let arc = Arc::new(sftp);
-        self.sessions.insert(server_id.to_string(), arc.clone());
+
+        // 注册（短锁；重复连接时后到者覆盖，先到者的连接会因 Arc drop 自动关闭）
+        self.sessions
+            .lock()
+            .await
+            .insert(server_id.to_string(), arc.clone());
         Ok(arc)
     }
 
     /// 关闭并移除某服务器的 SFTP 会话
-    pub async fn close(&mut self, server_id: &str) {
-        if let Some(sftp) = self.sessions.remove(server_id) {
+    pub async fn close(&self, server_id: &str) {
+        if let Some(sftp) = self.sessions.lock().await.remove(server_id) {
             let _ = sftp.close().await;
         }
     }
@@ -222,9 +234,15 @@ pub fn is_previewable(filename: &str) -> bool {
     )
 }
 
-/// 读取远程文件内容（base64 编码，用于下载）
-/// 限制 200MB 防止内存耗尽
-pub async fn read_file_base64(sftp: &SftpSession, path: &str) -> Result<FileDownload, String> {
+/// 将远程文件流式写入本地 dest_path（分块读写，避免大文件整块入内存导致 OOM）
+/// 通过 app.emit 周期性推送下载进度事件
+pub async fn download_to_file(
+    sftp: &SftpSession,
+    app: &AppHandle,
+    server_id: &str,
+    path: &str,
+    dest_path: &str,
+) -> Result<u64, String> {
     let stat = sftp
         .metadata(path)
         .await
@@ -238,35 +256,80 @@ pub async fn read_file_base64(sftp: &SftpSession, path: &str) -> Result<FileDown
         return Err(format!("文件 {} MB 超过下载上限 200MB", size / 1024 / 1024));
     }
 
-    let mut file = sftp
+    let mut remote = sftp
         .open(path)
         .await
         .map_err(|e| format!("打开文件失败: {}", e))?;
 
-    let mut buf = Vec::with_capacity(size as usize);
-    file.read_to_end(&mut buf)
+    // 本地目标文件：异步分块落盘（不在内存中缓存整文件）
+    let mut local = LocalFile::create(dest_path)
         .await
-        .map_err(|e| format!("读取文件失败: {}", e))?;
+        .map_err(|e| format!("无法创建本地文件 {}: {}", dest_path, e))?;
 
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
-    Ok(FileDownload {
-        name: StdPath::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("download")
-            .to_string(),
-        content_base64: b64,
-        size,
-    })
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut written: u64 = 0;
+    let mut last_emit: u64 = 0;
+
+    loop {
+        let n = remote
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("读取远程文件失败: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        local
+            .write_all(&buf[..n])
+            .await
+            .map_err(|e| format!("写入本地文件失败: {}", e))?;
+        written += n as u64;
+
+        // 每写入约 512KB 推送一次进度（节流，避免事件洪泛）
+        if written - last_emit >= 512 * 1024 || written == size {
+            last_emit = written;
+            let pct = if size > 0 {
+                (written * 100 / size) as u8
+            } else {
+                100
+            };
+            let _ = app.emit(
+                events::SFTP_PROGRESS,
+                json!({
+                    "serverId": server_id,
+                    "progress": pct,
+                    "bytes": written,
+                    "total": size,
+                }),
+            );
+        }
+    }
+    local
+        .flush()
+        .await
+        .map_err(|e| format!("写入本地文件失败: {}", e))?;
+
+    // 结束再补发一次 100%
+    let _ = app.emit(
+        events::SFTP_PROGRESS,
+        json!({
+            "serverId": server_id,
+            "progress": 100u8,
+            "bytes": written,
+            "total": size,
+        }),
+    );
+
+    Ok(written)
 }
 
 /// 上传本地文件到远程路径（base64 解码写入）
 /// 限制 200MB
+/// overwrite=false 时若远程已存在同名文件，返回 "FILE_EXISTS" 由前端确认后重试
 pub async fn write_file_base64(
     sftp: &SftpSession,
     remote_path: &str,
     content_base64: &str,
+    overwrite: bool,
 ) -> Result<(), String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -275,6 +338,13 @@ pub async fn write_file_base64(
 
     if bytes.len() > 200 * 1024 * 1024 {
         return Err(format!("文件 {} MB 超过上传上限 200MB", bytes.len() / 1024 / 1024));
+    }
+
+    // 非覆盖模式：先检查是否存在，存在则报错让前端弹确认框
+    if !overwrite {
+        if sftp.metadata(remote_path).await.is_ok() {
+            return Err("FILE_EXISTS".into());
+        }
     }
 
     let mut file = sftp
@@ -298,19 +368,82 @@ pub async fn delete_file(sftp: &SftpSession, path: &str) -> Result<(), String> {
         .map_err(|e| format!("删除文件失败: {}", e))
 }
 
+/// 删除远程路径：文件直接删；目录递归删除其全部内容与自身
+pub async fn remove_path(sftp: &SftpSession, path: &str) -> Result<(), String> {
+    let stat = sftp
+        .metadata(path)
+        .await
+        .map_err(|e| format!("获取信息失败: {}", e))?;
+    if stat.file_type().is_dir() {
+        remove_dir_recursive(sftp, path).await
+    } else {
+        delete_file(sftp, path).await
+    }
+}
+
+/// 递归删除目录：先删子项（文件/符号链接直接删，子目录递归），最后删空目录本身
+async fn remove_dir_recursive(sftp: &SftpSession, path: &str) -> Result<(), String> {
+    let read_dir = sftp
+        .read_dir(path)
+        .await
+        .map_err(|e| format!("读取目录失败: {}", e))?;
+
+    // 先收集子项（避免迭代器与异步调用互相借用）
+    let mut children: Vec<(String, bool, bool)> = read_dir
+        .map(|e| {
+            let ft = e.file_type();
+            (e.path(), ft.is_dir(), ft.is_symlink())
+        })
+        .collect();
+
+    for (child_path, is_dir, is_symlink) in children.drain(..) {
+        if is_symlink {
+            // 符号链接直接删链接本身，不跟随
+            sftp.remove_file(&child_path)
+                .await
+                .map_err(|e| format!("删除符号链接失败: {}", e))?;
+        } else if is_dir {
+            Box::pin(remove_dir_recursive(sftp, &child_path)).await?;
+        } else {
+            sftp.remove_file(&child_path)
+                .await
+                .map_err(|e| format!("删除文件失败: {}", e))?;
+        }
+    }
+
+    sftp.remove_dir(path)
+        .await
+        .map_err(|e| format!("删除目录失败: {}", e))
+}
+
+/// 取路径的父目录（Unix 风格）
+fn parent_of(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(i) => trimmed[..i].to_string(),
+    }
+}
+
 /// 重命名远程文件/目录
+/// 防穿越：目标名不得含路径分隔符或 ".."，且目标必须与源在同一目录
 pub async fn rename_entry(sftp: &SftpSession, from: &str, to: &str) -> Result<(), String> {
+    if to.is_empty() || to.contains('/') || to.contains("..") || to.contains('\\') {
+        return Err("新名称不能包含路径分隔符或 ..".into());
+    }
+    if parent_of(from) != parent_of(to) {
+        return Err("重命名不能改变所在目录".into());
+    }
     sftp.rename(from, to)
         .await
         .map_err(|e| format!("重命名失败: {}", e))
 }
 
-/// 下载结果
+/// 下载结果（文件已由后端直接写入本地 dest_path，返回元信息供前端确认）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDownload {
     pub name: String,
-    pub content_base64: String,
     pub size: u64,
 }
 

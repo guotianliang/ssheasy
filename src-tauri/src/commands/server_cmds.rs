@@ -1,6 +1,7 @@
 use tauri::{AppHandle, State};
 
 use crate::secret::keychain;
+use crate::ssh::hostkey;
 use crate::ssh::session::ConnectConfig;
 use crate::storage::server_repo::{Server, ServerInput};
 use crate::AppState;
@@ -65,12 +66,39 @@ pub async fn server_update(
 }
 
 #[tauri::command]
-pub async fn server_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let db = state.db.lock().await;
-    db.delete_server(&id).map_err(|e| e.to_string())?;
+pub async fn server_delete(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    // 先记录服务器信息（用于清理 known_hosts）
+    let (host, port) = {
+        let db = state.db.lock().await;
+        match db.get_server(&id) {
+            Ok(Some(s)) => (s.host.clone(), s.port),
+            _ => (String::new(), 0),
+        }
+    };
+
+    {
+        let db = state.db.lock().await;
+        db.delete_server(&id).map_err(|e| e.to_string())?;
+    }
+
     // 清理 Keychain 中的密码与私钥 passphrase（忽略不存在的错误）
     let _ = keychain::delete_password(&id);
     let _ = keychain::delete_key_passphrase(&id);
+
+    // 清理该服务器的 SFTP 会话（避免句柄泄漏）
+    let manager = state.sftp_manager.lock().await;
+    manager.close(&id).await;
+    drop(manager);
+
+    // 清理 known_hosts 中该服务器的指纹记录
+    if !host.is_empty() {
+        let _ = hostkey::remove(&app, &host, port);
+    }
+
     Ok(())
 }
 
@@ -94,7 +122,7 @@ pub async fn server_test(
     };
 
     // 创建丢弃输出的 dummy channel（测试不需要终端输出）
-    let (output_tx, _output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (output_tx, _output_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
     // 尝试连接，成功则立即断开
     // 连接测试场景 interactive=false：不弹 Host Key 确认框，未知指纹直接接受

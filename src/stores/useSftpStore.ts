@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { listen } from "@tauri-apps/api/event";
 import type { FileEntry } from "@/types/sftp";
 import { sftpService } from "@/services/sftpService";
 
@@ -8,7 +9,7 @@ export type WorkspaceView = "terminal" | "files" | "logs";
 /** 传输任务状态 */
 export interface TransferState {
   active: boolean;
-  kind: "upload" | "download" | null;
+  kind: "upload" | "download" | "delete" | null;
   fileName: string | null;
   progress: number; // 0-100
   error: string | null;
@@ -64,15 +65,6 @@ function joinRemote(dir: string, name: string): string {
   return dir.endsWith("/") ? dir + name : dir + "/" + name;
 }
 
-function base64ToUint8Array(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
 function uint8ArrayToBase64(bytes: Uint8Array): string {
   let binary = "";
   const chunk = 0x8000;
@@ -80,12 +72,6 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
   }
   return btoa(binary);
-}
-
-/** 用 Tauri fs 插件把字节写入用户选择的本地路径（绝对路径，baseDir 省略） */
-async function writeLocalFile(path: string, bytes: Uint8Array): Promise<void> {
-  const { writeFile } = await import("@tauri-apps/plugin-fs");
-  await writeFile(path, bytes);
 }
 
 export const useSftpStore = create<SftpState>((set, get) => ({
@@ -169,30 +155,36 @@ export const useSftpStore = create<SftpState>((set, get) => ({
     set({ previewFile: null, previewContent: "", previewError: null }),
 
   download: async (serverId, file) => {
+    // 先让用户选择保存位置（取消则不发起下载）
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const target = await save({ title: "保存文件", defaultPath: file.name });
+    if (!target) return;
+
     set({
-      transfer: { active: true, kind: "download", fileName: file.name, progress: 5, error: null },
+      transfer: { active: true, kind: "download", fileName: file.name, progress: 0, error: null },
     });
+
+    // 监听后端真实下载进度
+    const unlisten = await listen<{ serverId: string; progress: number }>(
+      "sftp:progress",
+      (event) => {
+        if (event.payload.serverId !== serverId) return;
+        set({
+          transfer: {
+            active: true,
+            kind: "download",
+            fileName: file.name,
+            progress: event.payload.progress,
+            error: null,
+          },
+        });
+      },
+    );
+
     try {
-      // 后端一次读回 base64
-      const result = await sftpService.download(serverId, file.path);
-      set({ transfer: { active: true, kind: "download", fileName: file.name, progress: 70, error: null } });
-
-      // 让用户选择保存位置
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const target = await save({
-        title: "保存文件",
-        defaultPath: result.name,
-      });
-      if (!target) {
-        set({ transfer: { active: false, kind: null, fileName: null, progress: 0, error: null } });
-        return; // 用户取消
-      }
-
-      // 解码并写本地文件
-      const bytes = base64ToUint8Array(result.contentBase64);
-      await writeLocalFile(target, bytes);
-
-      set({ transfer: { active: false, kind: null, fileName: null, progress: 100, error: null } });
+      // 后端流式写入本地目标文件（不再整块载入内存，避免大文件 OOM）
+      await sftpService.download(serverId, file.path, target);
+      set({ transfer: { active: true, kind: "download", fileName: file.name, progress: 100, error: null } });
       setTimeout(() => set({ transfer: { active: false, kind: null, fileName: null, progress: 0, error: null } }), 1500);
     } catch (e) {
       set({
@@ -204,6 +196,8 @@ export const useSftpStore = create<SftpState>((set, get) => ({
           error: e instanceof Error ? e.message : String(e),
         },
       });
+    } finally {
+      unlisten();
     }
   },
 
@@ -232,7 +226,22 @@ export const useSftpStore = create<SftpState>((set, get) => ({
       set({ transfer: { active: true, kind: "upload", fileName, progress: 40, error: null } });
 
       const remotePath = joinRemote(dir, fileName);
-      await sftpService.upload(serverId, remotePath, b64);
+      try {
+        await sftpService.upload(serverId, remotePath, b64, false);
+      } catch (e) {
+        // 远程已存在同名文件：确认后覆盖重试
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("FILE_EXISTS")) {
+          const ok = window.confirm(`远程已存在文件「${fileName}」，是否覆盖？`);
+          if (!ok) {
+            set({ transfer: { active: false, kind: null, fileName: null, progress: 0, error: null } });
+            return;
+          }
+          await sftpService.upload(serverId, remotePath, b64, true);
+        } else {
+          throw e;
+        }
+      }
 
       set({ transfer: { active: false, kind: null, fileName: null, progress: 100, error: null } });
       // 刷新目录
@@ -252,7 +261,7 @@ export const useSftpStore = create<SftpState>((set, get) => ({
   },
 
   remove: async (serverId, file) => {
-    set({ transfer: { active: true, kind: "download", fileName: file.name, progress: 0, error: null } });
+    set({ transfer: { active: true, kind: "delete", fileName: file.name, progress: 0, error: null } });
     try {
       await sftpService.remove(serverId, file.path);
       await get().refresh(serverId);

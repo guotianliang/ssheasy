@@ -30,6 +30,14 @@ function breadcrumbs(path: string): { label: string; path: string }[] {
   return crumbs;
 }
 
+/// 重命名输入校验：拒绝空、含路径分隔符或 .. 的名字（防目录穿越）
+function isValidRename(name: string): boolean {
+  if (!name || name.includes("/") || name.includes("\\") || name.includes("..")) {
+    return false;
+  }
+  return true;
+}
+
 export function FileBrowser() {
   const activeSessionId = useTerminalStore((s) => s.activeSessionId);
   const sessions = useTerminalStore((s) => s.sessions);
@@ -260,7 +268,7 @@ export function FileBrowser() {
         <div className="absolute bottom-0 left-0 right-0 z-20 px-3 py-1.5 bg-surface border-t border-border-subtle flex items-center gap-2">
           <span className="w-3 h-3 border border-tertiary border-t-accent rounded-full animate-spin flex-shrink-0" />
           <span className="text-label text-secondary truncate flex-shrink-0">
-            {transfer.kind === "upload" ? "上传" : "下载"} {transfer.fileName}
+            {transfer.kind === "upload" ? "上传" : transfer.kind === "download" ? "下载" : "删除"} {transfer.fileName}
           </span>
           <div className="flex-1 h-1 bg-elevated rounded-full overflow-hidden">
             <div
@@ -301,6 +309,10 @@ export function FileBrowser() {
               onChange={(e) => setRenameValue(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && renameValue.trim() && activeServerId) {
+                  if (!isValidRename(renameValue.trim())) {
+                    window.alert("名称不能包含 / 或 .. ，且不能为空");
+                    return;
+                  }
                   rename(activeServerId, renaming, renameValue.trim());
                   setRenaming(null);
                 }
@@ -317,8 +329,14 @@ export function FileBrowser() {
               <button
                 className="px-3 py-1 rounded-md text-helper font-medium text-white bg-accent hover:bg-accent-hover transition-colors"
                 onClick={() => {
-                  if (renameValue.trim() && activeServerId) {
-                    rename(activeServerId, renaming, renameValue.trim());
+                  const name = renameValue.trim();
+                  if (!name) return;
+                  if (!isValidRename(name)) {
+                    window.alert("名称不能包含 / 或 .. ，且不能为空");
+                    return;
+                  }
+                  if (activeServerId) {
+                    rename(activeServerId, renaming, name);
                   }
                   setRenaming(null);
                 }}

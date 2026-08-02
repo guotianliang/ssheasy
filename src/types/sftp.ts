@@ -15,10 +15,9 @@ export interface FileContent {
   truncated: boolean;
 }
 
-/** 下载结果（base64 内容） */
+/** 下载结果（文件已由后端直接写入本地路径，仅返回元信息） */
 export interface FileDownload {
   name: string;
-  contentBase64: string;
   size: number;
 }
 

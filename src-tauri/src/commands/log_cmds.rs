@@ -59,7 +59,7 @@ pub async fn log_operation(
     server_id: String,
     command: String,
 ) -> Result<(), String> {
-    let db = state.db.lock().await;
+    let mut db = state.db.lock().await;
     db.insert_log(&server_id, &command, assess_risk(&command))
         .map_err(|e| e.to_string())?;
     // 同时更新「最近使用」

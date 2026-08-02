@@ -85,12 +85,28 @@ export function CommandSidebar() {
     }
   };
 
+  // 高危命令判定（与后端 log_cmds assess_risk 的高危列表保持一致）
+  const isDangerous = (cmd: string): boolean => {
+    const c = cmd.toLowerCase();
+    return [
+      "rm -rf", "rm -fr", "mkfs", "dd if=", "shutdown", "reboot", "init 0",
+      "init 6", "drop database", "truncate ", "fdisk", "parted", "kill -9",
+      "killall", "> /dev/sd", ":(){",
+    ].some((p) => c.includes(p));
+  };
+
   // 最近使用：点击执行（不带模板变量直接执行）
   const handleRecentClick = (command: string) => {
     if (!activeSessionId) {
       setNoSessionHint(true);
       setTimeout(() => setNoSessionHint(false), 2500);
       return;
+    }
+    // 高危命令二次确认，避免一键重放 rm -rf 等危险操作
+    if (isDangerous(command)) {
+      if (!window.confirm(`该命令存在高危风险，确认执行？\n\n${command}`)) {
+        return;
+      }
     }
     terminalService.sendInput(activeSessionId, command + "\n");
     if (activeServerId) {

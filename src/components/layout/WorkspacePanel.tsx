@@ -1,6 +1,7 @@
 import type { MutableRefObject } from "react";
 import { TerminalPanel } from "@/components/terminal/TerminalPanel";
 import { FileBrowser } from "@/components/files/FileBrowser";
+import { LogPanel } from "@/components/logs/LogPanel";
 import { useSftpStore } from "@/stores/useSftpStore";
 import type { TerminalOutputEvent } from "@/types/terminal";
 
@@ -20,6 +21,7 @@ export function WorkspacePanel({ outputHandlerRef }: WorkspacePanelProps) {
         <TerminalPanel outputHandlerRef={outputHandlerRef} />
       </div>
       {viewMode === "files" && <FileBrowser />}
+      {viewMode === "logs" && <LogPanel />}
     </div>
   );
 }

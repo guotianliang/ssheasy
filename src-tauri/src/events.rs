@@ -6,3 +6,5 @@ pub const CONNECTION_ERROR: &str = "connection:error";
 pub const HOSTKEY_VERIFY: &str = "hostkey:verify";
 /// 终端状态栏信息（user@host:路径）
 pub const SESSION_STATUS: &str = "session:status";
+/// SFTP 传输进度（下载流式写入本地时推送）
+pub const SFTP_PROGRESS: &str = "sftp:progress";

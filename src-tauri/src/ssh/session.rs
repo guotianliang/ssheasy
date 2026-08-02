@@ -1,7 +1,9 @@
 use std::borrow::Cow;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use russh::client;
@@ -10,7 +12,7 @@ use russh::keys::load_secret_key;
 use russh::Preferred;
 use russh::{kex, ChannelMsg, Disconnect};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::error_translate;
 use crate::events;
@@ -182,6 +184,8 @@ pub struct SessionHandle {
     /// 状态栏变化通知通道（receiver 由 manager 持有并转发到前端）
     pub status_tx: mpsc::UnboundedSender<SessionStatusInfo>,
     pub status_rx: Option<mpsc::UnboundedReceiver<SessionStatusInfo>>,
+    /// 关断信号：close_session 发送 true 后，I/O 循环据此退出并真正断开 SSH
+    pub shutdown: watch::Sender<bool>,
 }
 
 impl SessionHandle {
@@ -195,6 +199,28 @@ impl SessionHandle {
         self.resize_tx
             .send((cols, rows))
             .map_err(|_| "session closed".to_string())
+    }
+}
+
+/// 用全 0 覆盖文件内容，避免解密后的私钥明文残留在磁盘（删除前的兜底）
+fn zeroize_file(path: &std::path::Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let len = meta.len();
+        if len == 0 {
+            return;
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(path) {
+            let zeros = [0u8; 4096];
+            let mut written = 0u64;
+            while written < len {
+                let chunk = std::cmp::min(4096, (len - written) as usize);
+                if f.write_all(&zeros[..chunk]).is_err() {
+                    break;
+                }
+                written += chunk as u64;
+            }
+            let _ = f.flush();
+        }
     }
 }
 
@@ -255,7 +281,8 @@ pub fn load_key_with_legacy_fallback(
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                // 清理可能产生的空文件
+                // 清理可能产生的临时文件（先清零再删）
+                zeroize_file(&tmp_path);
                 let _ = std::fs::remove_file(&tmp_path);
                 return Err(if stderr.contains("bad decrypt") || stderr.contains("Could not read")
                 {
@@ -272,7 +299,8 @@ pub fn load_key_with_legacy_fallback(
             // 4) 加载已解密的临时密钥（无密码）
             let result = load_secret_key(&tmp_path, None);
 
-            // 5) 立即清理临时文件（无论成功失败）
+            // 5) 先覆盖临时文件内容（清零解密后的私钥明文），再删除
+            zeroize_file(&tmp_path);
             let _ = std::fs::remove_file(&tmp_path);
 
             result.map_err(|e| format!("解密后的私钥仍无法解析: {}", e))
@@ -282,21 +310,28 @@ pub fn load_key_with_legacy_fallback(
 
 /// 建立 SSH 连接并启动 I/O 循环
 /// 返回 SessionHandle 用于后续交互
+/// output_tx 为原始字节透传通道（xterm.js 原生吃 Uint8Array，避免多字节字符被截断乱码）
 pub async fn connect(
     app: AppHandle,
     session_id: String,
     server_id: String,
     config: &ConnectConfig,
-    output_tx: mpsc::UnboundedSender<String>,
+    output_tx: mpsc::UnboundedSender<Vec<u8>>,
     interactive: bool,
 ) -> Result<SessionHandle, error_translate::TranslatedError> {
     let ssh_config = Arc::new(client::Config {
         inactivity_timeout: Some(Duration::from_secs(60)),
+        // 真实存活探测：russh 周期性发 SSH 级 keepalive，连续超时后由 channel.wait() 暴露断线
+        keepalive_interval: Some(Duration::from_secs(30)),
+        keepalive_max: 3,
         preferred: legacy_preferred(),
         ..<_>::default()
     });
 
     let addr = format!("{}:{}", config.host, config.port);
+
+    // 提前克隆 AppHandle 供 I/O 循环退出时 emit 断线事件（下方 app 会被 ClientHandler 拿走所有权）
+    let io_app = app.clone();
 
     // 建立 TCP + SSH 连接
     let mut handle = client::connect(
@@ -384,12 +419,22 @@ pub async fn connect(
     }));
     let (status_tx, status_rx) = mpsc::unbounded_channel::<SessionStatusInfo>();
 
+    // 关断信号通道：close_session 发送 true，I/O 循环据此退出并真正断开 SSH
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
     // 启动 I/O 循环 task
     let io_status = status.clone();
     let io_status_tx = status_tx.clone();
+    let io_sid = session_id.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
+                // 显式关闭信号
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
                 // 用户输入
                 Some(data) = input_rx.recv() => {
                     if channel.data(&data[..]).await.is_err() {
@@ -405,10 +450,10 @@ pub async fn connect(
                     match msg {
                         Some(ChannelMsg::Data { data }) => {
                             // 状态解析：从输出中提取 user@host 提示符和 cwd
+                            // （仅对可解码部分解析，不影响原始字节透传）
+                            let text = String::from_utf8_lossy(&data).to_string();
                             let mut info = io_status.lock().await;
                             let mut changed = false;
-
-                            let text = String::from_utf8_lossy(&data).to_string();
 
                             // 1) 解析 cwd：形如  path$
                             if let Some(path) = extract_cwd(&text) {
@@ -439,8 +484,8 @@ pub async fn connect(
                                 drop(info);
                             }
 
-                            let text = String::from_utf8_lossy(&data).to_string();
-                            if output_tx.send(text).is_err() {
+                            // 原始字节透传：避免 UTF-8 多字节字符被 SSH 分包截断导致乱码
+                            if output_tx.send(data.to_vec()).is_err() {
                                 break;
                             }
                         }
@@ -452,7 +497,15 @@ pub async fn connect(
                 }
             }
         }
-        // 会话结束，断开连接
+        // 会话结束（显式关闭 或 网络断开/keepalive 超时），通知前端并真正断开 SSH
+        let _ = io_app.emit(
+            events::CONNECTION_STATUS,
+            serde_json::json!({
+                "sessionId": io_sid,
+                "status": "disconnected",
+                "message": "连接已断开"
+            }),
+        );
         let _ = handle.disconnect(Disconnect::ByApplication, "session ended", "en").await;
     });
 
@@ -464,15 +517,22 @@ pub async fn connect(
         status,
         status_tx,
         status_rx: Some(status_rx),
+        shutdown: shutdown_tx,
     })
 }
 
+/// 状态解析用的正则（热路径，编译一次复用，避免每条输出都重建）
+static RE_CWD: LazyLock<regex::Regex> = LazyLock::new(|| {
+    // 匹配形如：` /var/log`（末尾空格 + 斜杠路径 + 空格/行尾），也兼容 `~` 家目录显示
+    regex::Regex::new(r#"(?:^|[\r\n])\s+((?:/|~)[^\s$#]*[^\s$#/]?)\s*[\r\n]?$"#).unwrap()
+});
+static RE_USERHOST: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"([\w.-]+)@([\w.-]+):").unwrap()
+});
+
 /// 从输出中提取 cwd：匹配形如  /path/to/dir 的路径
 fn extract_cwd(text: &str) -> Option<String> {
-    // 匹配形如：` /var/log`（末尾空格 + 斜杠路径 + 空格/行尾）
-    // 也兼容 `~` 家目录显示
-    let re = regex::Regex::new(r#"(?:^|[\r\n])\s+((?:/|~)[^\s$#]*[^\s$#/]?)\s*[\r\n]?$"#).unwrap();
-    if let Some(cap) = re.captures(text) {
+    if let Some(cap) = RE_CWD.captures(text) {
         let path = cap.get(1).unwrap().as_str().trim();
         if path.len() > 1 {
             return Some(path.to_string());
@@ -483,8 +543,7 @@ fn extract_cwd(text: &str) -> Option<String> {
 
 /// 从输出中提取 user@host：匹配形如  user@host:~$ 的提示符
 fn extract_userhost(text: &str) -> Option<(String, String)> {
-    let re = regex::Regex::new(r"([\w.-]+)@([\w.-]+):").unwrap();
-    if let Some(cap) = re.captures(text) {
+    if let Some(cap) = RE_USERHOST.captures(text) {
         let user = cap.get(1).unwrap().as_str().to_string();
         let host = cap.get(2).unwrap().as_str().to_string();
         if user == "root" || user == "user" || !user.is_empty() {

@@ -45,6 +45,18 @@ export function ViewSwitch() {
           />
         </svg>
       )}
+      {item(
+        "logs",
+        "日志",
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
+          <path
+            d="M2.5 3.5H13.5M2.5 8H13.5M2.5 12.5H9"
+            stroke="currentColor"
+            strokeWidth="1.3"
+            strokeLinecap="round"
+          />
+        </svg>
+      )}
     </div>
   );
 }

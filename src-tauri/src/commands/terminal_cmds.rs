@@ -20,8 +20,8 @@ pub async fn terminal_connect(
         build_config_from_server(&server).map_err(|e| serde_json::json!({ "error": e }))?
     };
 
-    // 建立连接
-    let mut manager = state.ssh_manager.lock().await;
+    // 建立连接（ConnectionManager 内部自锁，握手全程不阻塞其他终端操作）
+    let manager = state.ssh_manager.lock().await;
     manager
         .create_session(&server_id, &config)
         .await
@@ -35,7 +35,7 @@ pub async fn terminal_input(
     data: String,
 ) -> Result<(), String> {
     let manager = state.ssh_manager.lock().await;
-    manager.write(&session_id, data.as_bytes())
+    manager.write(&session_id, data.as_bytes()).await
 }
 
 #[tauri::command]
@@ -46,19 +46,21 @@ pub async fn terminal_resize(
     rows: u32,
 ) -> Result<(), String> {
     let manager = state.ssh_manager.lock().await;
-    manager.resize(&session_id, cols, rows)
+    manager.resize(&session_id, cols, rows).await
 }
 
 #[tauri::command]
 pub async fn terminal_close(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let mut manager = state.ssh_manager.lock().await;
     // 关闭会话前获取其 server_id，联动清理 SFTP 会话
-    let server_id = manager.session_server_id(&session_id);
-    manager.close_session(&session_id);
-    drop(manager);
+    let server_id = {
+        let manager = state.ssh_manager.lock().await;
+        let sid = manager.session_server_id(&session_id).await;
+        manager.close_session(&session_id).await;
+        sid
+    };
 
     if let Some(sid) = server_id {
-        let mut sftp = state.sftp_manager.lock().await;
+        let sftp = state.sftp_manager.lock().await;
         sftp.close(&sid).await;
     }
     Ok(())
@@ -71,5 +73,5 @@ pub async fn terminal_status(
     session_id: String,
 ) -> Result<SessionStatusInfo, String> {
     let manager = state.ssh_manager.lock().await;
-    manager.get_status(&session_id)
+    manager.get_status(&session_id).await
 }

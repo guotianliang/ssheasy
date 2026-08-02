@@ -67,3 +67,27 @@ pub fn add(app: &tauri::AppHandle, host: &str, port: u16, key_str: &str) -> std:
     }
     Ok(())
 }
+
+/// 删除某 host:port 的所有 known_hosts 记录（删除服务器时清理指纹残留）
+pub fn remove(app: &tauri::AppHandle, host: &str, port: u16) -> std::io::Result<()> {
+    let path = known_hosts_path(app);
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // 文件不存在视为已清理
+    };
+
+    let port_str = port.to_string();
+    let filtered: Vec<&str> = content
+        .lines()
+        .filter(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            !(parts.len() >= 2 && parts[0] == host && parts[1] == port_str)
+        })
+        .collect();
+
+    let new_content = filtered.join("\n");
+    if new_content != content {
+        fs::write(&path, if new_content.is_empty() { String::new() } else { new_content + "\n" })?;
+    }
+    Ok(())
+}
