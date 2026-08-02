@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::events;
 
+use crate::ssh::manager::ConnectionManager;
 use super::session::{legacy_preferred, load_key_with_legacy_fallback, ClientHandler, ConnectConfig};
 
 /// 文件条目（返回给前端）
@@ -34,13 +35,16 @@ pub struct FileEntry {
 /// sessions 使用内部 Mutex：建连在锁外进行，避免一个文件操作阻塞其他操作
 pub struct SftpManager {
     app: AppHandle,
+    /// 终端连接管理器：用于复用已建立的 SSH 连接（同一条，避免重复握手/认证）
+    ssh_manager: Arc<tokio::sync::Mutex<ConnectionManager>>,
     sessions: tokio::sync::Mutex<HashMap<String, Arc<SftpSession>>>,
 }
 
 impl SftpManager {
-    pub fn new(app: AppHandle) -> Self {
+    pub fn new(app: AppHandle, ssh_manager: Arc<tokio::sync::Mutex<ConnectionManager>>) -> Self {
         Self {
             app,
+            ssh_manager,
             sessions: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -56,7 +60,21 @@ impl SftpManager {
             return Ok(existing.clone());
         }
 
-        // 锁外建立连接
+        // 优先复用终端已建立的 SSH 连接（同一条，省一次握手/认证/端口占用）
+        if let Some(client) = self.ssh_manager.lock().await.client_by_server(server_id).await {
+            if let Ok(sftp) = Self::open_on_client(client).await {
+                let arc = Arc::new(sftp);
+                self.sessions
+                    .lock()
+                    .await
+                    .insert(server_id.to_string(), arc.clone());
+                return Ok(arc);
+            } else {
+                log::warn!("复用终端连接建立 SFTP 失败，回退到独立连接");
+            }
+        }
+
+        // 回退：建立一条独立的 SSH 连接并打开 sftp 子系统
         let sftp = Self::connect(self.app.clone(), config).await?;
         let arc = Arc::new(sftp);
 
@@ -66,6 +84,25 @@ impl SftpManager {
             .await
             .insert(server_id.to_string(), arc.clone());
         Ok(arc)
+    }
+
+    /// 在已有的 client::Handle 上开一条 SFTP 子系统通道（复用终端连接）
+    async fn open_on_client(
+        client: Arc<tokio::sync::Mutex<client::Handle<ClientHandler>>>,
+    ) -> Result<SftpSession, String> {
+        let g = client.lock().await;
+        let channel = g
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("打开会话通道失败: {}", e))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|e| format!("请求 sftp 子系统失败（服务器可能未启用 SFTP）: {}", e))?;
+
+        SftpSession::new(channel.into_stream())
+            .await
+            .map_err(|e| format!("初始化 SFTP 会话失败: {}", e))
     }
 
     /// 关闭并移除某服务器的 SFTP 会话

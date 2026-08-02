@@ -12,7 +12,7 @@ use russh::keys::load_secret_key;
 use russh::Preferred;
 use russh::{kex, ChannelMsg, Disconnect};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Mutex};
 
 use super::error_translate;
 use crate::events;
@@ -177,6 +177,9 @@ pub fn build_config_from_server(
 pub struct SessionHandle {
     pub session_id: String,
     pub server_id: String,
+    /// 底层 russh 客户端句柄（共享，供 SFTP 复用同一条 SSH 连接）。
+    /// 注意 client::Handle 不可 Clone，故用 Arc<Mutex> 共享；I/O 循环仅结尾 disconnect 时加锁。
+    pub client: Arc<tokio::sync::Mutex<client::Handle<ClientHandler>>>,
     pub input_tx: mpsc::UnboundedSender<Vec<u8>>,
     pub resize_tx: mpsc::UnboundedSender<(u32, u32)>,
     /// 状态栏信息（user@host:路径），由 I/O task 监听输出更新
@@ -407,6 +410,10 @@ pub async fn connect(
         .await
         .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
 
+    // 将底层 client::Handle 放入共享 Arc<Mutex>，供 SFTP 复用同一条 SSH 连接
+    let client = Arc::new(Mutex::new(handle));
+    let client_for_session = client.clone();
+
     // 创建输入/resize 通道
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u32, u32)>();
@@ -506,12 +513,13 @@ pub async fn connect(
                 "message": "连接已断开"
             }),
         );
-        let _ = handle.disconnect(Disconnect::ByApplication, "session ended", "en").await;
+        let _ = client.lock().await.disconnect(Disconnect::ByApplication, "session ended", "en").await;
     });
 
     Ok(SessionHandle {
         session_id,
         server_id,
+        client: client_for_session,
         input_tx,
         resize_tx,
         status,

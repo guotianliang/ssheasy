@@ -44,10 +44,16 @@ pub fn run() {
             db.seed_builtin_commands()
                 .expect("failed to seed builtin commands");
 
+            let ssh_manager = Arc::new(Mutex::new(ConnectionManager::new(app.handle().clone())));
+            let sftp_manager = Arc::new(Mutex::new(SftpManager::new(
+                app.handle().clone(),
+                ssh_manager.clone(),
+            )));
+
             let state = AppState {
                 db: Arc::new(Mutex::new(db)),
-                ssh_manager: Arc::new(Mutex::new(ConnectionManager::new(app.handle().clone()))),
-                sftp_manager: Arc::new(Mutex::new(SftpManager::new(app.handle().clone()))),
+                ssh_manager,
+                sftp_manager,
                 hostkey_pending: Arc::new(Mutex::new(HashMap::new())),
             };
 

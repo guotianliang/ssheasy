@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use russh::client;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex};
 
-use super::session::{self, ConnectConfig, SessionHandle, SessionStatusInfo};
+use super::session::{self, ClientHandler, ConnectConfig, SessionHandle, SessionStatusInfo};
 use crate::events;
 
 /// 连接池：管理所有活跃 SSH 会话
@@ -153,5 +155,18 @@ impl ConnectionManager {
             .await
             .get(session_id)
             .map(|s| s.server_id.clone())
+    }
+
+    /// 返回某服务器当前终端会话底层 client::Handle（供 SFTP 复用同一条 SSH 连接）。
+    /// 若没有已建立的终端会话则返回 None，SFTP 应回退到独立连接。
+    pub async fn client_by_server(
+        &self,
+        server_id: &str,
+    ) -> Option<Arc<tokio::sync::Mutex<client::Handle<ClientHandler>>>> {
+        let sessions = self.sessions.lock().await;
+        sessions
+            .values()
+            .find(|s| s.server_id == server_id)
+            .map(|s| s.client.clone())
     }
 }
