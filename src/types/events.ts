@@ -4,4 +4,5 @@ export const EVENTS = {
   CONNECTION_STATUS: "connection:status",
   CONNECTION_ERROR: "connection:error",
   HOSTKEY_VERIFY: "hostkey:verify",
+  SESSION_STATUS: "session:status",
 } as const;

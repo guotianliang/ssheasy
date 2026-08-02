@@ -28,6 +28,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             let app_dir = app
                 .path()
@@ -65,6 +67,7 @@ pub fn run() {
             commands::terminal_cmds::terminal_input,
             commands::terminal_cmds::terminal_resize,
             commands::terminal_cmds::terminal_close,
+            commands::terminal_cmds::terminal_status,
             commands::command_cmds::command_list,
             commands::command_cmds::command_add,
             commands::command_cmds::command_update,
@@ -76,6 +79,11 @@ pub fn run() {
             commands::sftp_cmds::sftp_home,
             commands::sftp_cmds::sftp_close,
             commands::sftp_cmds::sftp_read_file,
+            commands::sftp_cmds::sftp_download,
+            commands::sftp_cmds::sftp_upload,
+            commands::sftp_cmds::sftp_delete,
+            commands::sftp_cmds::sftp_rename,
+            commands::log_cmds::list_recent_commands,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

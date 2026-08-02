@@ -15,6 +15,13 @@ export interface FileContent {
   truncated: boolean;
 }
 
+/** 下载结果（base64 内容） */
+export interface FileDownload {
+  name: string;
+  contentBase64: string;
+  size: number;
+}
+
 /** 可预览的文本文件后缀 */
 const PREVIEWABLE_EXTS = [
   "log", "txt", "conf", "cfg", "json", "yaml", "yml", "ini", "env",

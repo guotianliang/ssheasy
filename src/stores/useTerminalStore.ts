@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { terminalService } from "@/services/terminalService";
+import type { SessionStatusInfo } from "@/types/terminal";
 
 export type SessionStatus = "connected" | "disconnected";
 
@@ -14,17 +15,22 @@ interface TerminalSession {
 interface TerminalState {
   sessions: TerminalSession[];
   activeSessionId: string | null;
+  /** 各会话的状态栏信息（user@host:路径） */
+  sessionStatuses: Record<string, SessionStatusInfo>;
 
   connect: (serverId: string, serverName: string) => Promise<string>;
   reconnect: (sessionId: string) => Promise<string | null>;
   close: (sessionId: string) => Promise<void>;
   setActiveSession: (sessionId: string) => void;
   markDisconnected: (sessionId: string, reason?: string) => void;
+  updateStatus: (sessionId: string, info: SessionStatusInfo) => void;
+  refreshStatus: (sessionId: string) => Promise<void>;
 }
 
 export const useTerminalStore = create<TerminalState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
+  sessionStatuses: {},
 
   connect: async (serverId, serverName) => {
     const sessionId = await terminalService.connect(serverId);
@@ -77,4 +83,23 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
           : t
       ),
     })),
+
+  updateStatus: (sessionId, info) =>
+    set((s) => ({
+      sessionStatuses: {
+        ...s.sessionStatuses,
+        [sessionId]: info,
+      },
+    })),
+
+  refreshStatus: async (sessionId) => {
+    try {
+      const info = await terminalService.status(sessionId);
+      if (info.user || info.host || info.cwd) {
+        get().updateStatus(sessionId, info);
+      }
+    } catch {
+      // 状态查询失败静默忽略
+    }
+  },
 }));

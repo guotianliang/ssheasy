@@ -1,6 +1,7 @@
 use tauri::State;
 
 use crate::storage::log_repo::OperationLog;
+use crate::storage::recent_command_repo::RecentCommand;
 use crate::AppState;
 
 /// 简单的命令风险评级：高危 / 中危 / 低危
@@ -60,6 +61,22 @@ pub async fn log_operation(
 ) -> Result<(), String> {
     let db = state.db.lock().await;
     db.insert_log(&server_id, &command, assess_risk(&command))
+        .map_err(|e| e.to_string())?;
+    // 同时更新「最近使用」
+    db.touch_recent_command(&server_id, &command)
+        .map_err(|e| e.to_string())
+}
+
+/// 查询某服务器的最近使用命令
+#[tauri::command]
+pub async fn list_recent_commands(
+    state: State<'_, AppState>,
+    server_id: String,
+    limit: Option<i64>,
+) -> Result<Vec<RecentCommand>, String> {
+    let db = state.db.lock().await;
+    let limit = limit.unwrap_or(20).clamp(1, 50);
+    db.list_recent_commands(&server_id, limit)
         .map_err(|e| e.to_string())
 }
 

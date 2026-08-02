@@ -31,6 +31,7 @@ impl Database {
         const MIGRATIONS: &[&str] = &[
             include_str!("../../migrations/001_init.sql"),
             include_str!("../../migrations/002_path_bookmarks.sql"),
+            include_str!("../../migrations/003_recent_commands.sql"),
         ];
 
         for (i, sql) in MIGRATIONS.iter().enumerate() {

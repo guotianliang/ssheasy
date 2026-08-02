@@ -18,7 +18,8 @@ interface TermInstance {
 }
 
 export function TerminalPanel({ outputHandlerRef }: TerminalPanelProps) {
-  const { sessions, activeSessionId, setActiveSession, close, reconnect } = useTerminalStore();
+  const { sessions, activeSessionId, setActiveSession, close, reconnect, sessionStatuses, refreshStatus } =
+    useTerminalStore();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const instancesRef = useRef<Map<string, TermInstance>>(new Map());
 
@@ -139,6 +140,14 @@ export function TerminalPanel({ outputHandlerRef }: TerminalPanelProps) {
   useEffect(() => {
     outputHandlerRef.current = handleOutput;
   }, [handleOutput, outputHandlerRef]);
+
+  // 切换/新建会话时主动拉一次状态栏（等 shell 提示符出现）
+  useEffect(() => {
+    if (activeSessionId) {
+      const t = setTimeout(() => refreshStatus(activeSessionId), 500);
+      return () => clearTimeout(t);
+    }
+  }, [activeSessionId, refreshStatus]);
 
   const handleAreaClick = () => {
     if (activeSessionId) {
@@ -263,6 +272,31 @@ export function TerminalPanel({ outputHandlerRef }: TerminalPanelProps) {
           );
         })()}
       </div>
+
+      {/* 状态栏 */}
+      {(() => {
+        const active = sessions.find((s) => s.sessionId === activeSessionId);
+        if (!active || active.status !== "connected") return null;
+        const info = sessionStatuses[active.sessionId];
+        const label = info && (info.user || info.host || info.cwd)
+          ? `${info.user}@${info.host}${info.cwd ? ":" + info.cwd : ""}`
+          : `${active.serverName} · 已连接`;
+        return (
+          <div className="flex items-center gap-2 px-3 h-6 border-t border-border-subtle bg-surface flex-shrink-0 text-label text-tertiary select-none">
+            <span className="w-1.5 h-1.5 rounded-full bg-success flex-shrink-0" />
+            <span className="font-mono truncate">{label}</span>
+            <button
+              className="ml-auto text-disabled hover:text-accent transition-colors"
+              onClick={() => refreshStatus(active.sessionId)}
+              title="刷新状态"
+            >
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                <path d="M10 6a4 4 0 1 1-1.2-2.85M10 1.5v2.4H7.6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -43,6 +43,12 @@ export function FileBrowser() {
     goHome,
     goUp,
     refresh,
+    upload,
+    download,
+    remove,
+    rename,
+    transfer,
+    clearTransferError,
   } = useSftpStore();
   const addBookmark = usePathBookmarkStore((s) => s.addBookmark);
   const previewFile_ = useSftpStore((s) => s.previewFile_);
@@ -50,6 +56,8 @@ export function FileBrowser() {
 
   const [selected, setSelected] = useState<string | null>(null);
   const [justStarred, setJustStarred] = useState(false);
+  const [renaming, setRenaming] = useState<FileEntry | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   const activeServerId =
     sessions.find((s) => s.sessionId === activeSessionId)?.serverId ?? null;
@@ -97,7 +105,7 @@ export function FileBrowser() {
   const tooMany = entries.length > 500;
 
   return (
-    <div className="flex flex-col h-full bg-base">
+    <div className="flex flex-col h-full bg-base relative">
       {/* 头部：面包屑 + 视图切换 */}
       <div className="flex items-center gap-2 h-9 px-2 border-b border-border-subtle bg-surface flex-shrink-0">
         <div className="flex items-center gap-0.5 flex-shrink-0">
@@ -110,6 +118,48 @@ export function FileBrowser() {
           </ToolButton>
           <ToolButton title="刷新" onClick={() => activeServerId && refresh(activeServerId)}>
             <path d="M10 6a4 4 0 1 1-1.2-2.85M10 1.5v2.4H7.6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+          </ToolButton>
+          <div className="w-px h-4 bg-border-subtle mx-1" />
+          <ToolButton title="上传文件" onClick={() => activeServerId && upload(activeServerId)}>
+            <path d="M6 2.5V9M6 2.5L3.5 5M6 2.5L8.5 5M2.5 10.5V11.5H9.5V10.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+          </ToolButton>
+          <ToolButton
+            title={selected ? "下载选中文件" : "先点击选中一个文件"}
+            onClick={() => {
+              const target = selected ? entries.find((e) => e.path === selected) : null;
+              if (target && !target.isDir && activeServerId) download(activeServerId, target);
+            }}
+            disabled={!selected || !entries.find((e) => e.path === selected)}
+          >
+            <path d="M6 8.5V2M6 8.5L3.5 6M6 8.5L8.5 6M2.5 9.5V10.5H9.5V9.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+          </ToolButton>
+          <ToolButton
+            title={selected ? "删除选中项" : "先点击选中一个文件"}
+            danger
+            disabled={!selected}
+            onClick={() => {
+              const target = selected ? entries.find((e) => e.path === selected) : null;
+              if (!target || !activeServerId) return;
+              const label = target.isDir ? `目录「${target.name}」及其内容` : `文件「${target.name}」`;
+              if (window.confirm(`确定删除${label}？此操作不可恢复。`)) {
+                remove(activeServerId, target);
+              }
+            }}
+          >
+            <path d="M3 3.5H9M4.5 3.5V2.5H7.5V3.5M4 3.5V10H8V3.5M5 5V8.5M7 5V8.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+          </ToolButton>
+          <ToolButton
+            title={selected ? "重命名选中项" : "先点击选中一个文件"}
+            disabled={!selected}
+            onClick={() => {
+              const target = selected ? entries.find((e) => e.path === selected) : null;
+              if (!target) return;
+              setRenaming(target);
+              setRenameValue(target.name);
+            }}
+          >
+            <path d="M7.5 2.5L9.5 4.5L3.5 10.5L1.5 10.5L1.5 8.5L7.5 2.5Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+            <path d="M6.5 3.5L8.5 5.5" stroke="currentColor" strokeWidth="1.1" />
           </ToolButton>
           <ToolButton
             title={justStarred ? "已收藏到路径书签" : "收藏此目录到路径书签"}
@@ -204,6 +254,81 @@ export function FileBrowser() {
 
       {/* 文件预览覆盖层 */}
       {previewFile && <FilePreview />}
+
+      {/* 传输进度条 */}
+      {transfer.active && (
+        <div className="absolute bottom-0 left-0 right-0 z-20 px-3 py-1.5 bg-surface border-t border-border-subtle flex items-center gap-2">
+          <span className="w-3 h-3 border border-tertiary border-t-accent rounded-full animate-spin flex-shrink-0" />
+          <span className="text-label text-secondary truncate flex-shrink-0">
+            {transfer.kind === "upload" ? "上传" : "下载"} {transfer.fileName}
+          </span>
+          <div className="flex-1 h-1 bg-elevated rounded-full overflow-hidden">
+            <div
+              className="h-full bg-accent transition-all duration-300"
+              style={{ width: `${transfer.progress}%` }}
+            />
+          </div>
+          <span className="text-label text-tertiary w-8 text-right">{transfer.progress}%</span>
+        </div>
+      )}
+      {transfer.error && !transfer.active && (
+        <div className="absolute bottom-0 left-0 right-0 z-20 px-3 py-2 bg-danger-soft border-t border-danger/20 flex items-center gap-2 animate-fade-in">
+          <span className="text-label text-danger flex-1 truncate">{transfer.error}</span>
+          <button
+            className="text-label text-tertiary hover:text-primary flex-shrink-0"
+            onClick={clearTransferError}
+          >
+            关闭
+          </button>
+        </div>
+      )}
+
+      {/* 重命名弹窗 */}
+      {renaming && (
+        <div
+          className="absolute inset-0 z-30 bg-black/40 flex items-center justify-center animate-fade-in"
+          onClick={() => setRenaming(null)}
+        >
+          <div
+            className="bg-surface border border-border-subtle rounded-xl p-4 w-72 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-body text-primary mb-3">重命名</div>
+            <input
+              className="w-full px-2.5 py-1.5 rounded-md text-helper text-primary outline-none bg-base border border-border-subtle focus:border-accent focus:ring-2 focus:ring-accent/20"
+              value={renameValue}
+              autoFocus
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && renameValue.trim() && activeServerId) {
+                  rename(activeServerId, renaming, renameValue.trim());
+                  setRenaming(null);
+                }
+                if (e.key === "Escape") setRenaming(null);
+              }}
+            />
+            <div className="flex justify-end gap-2 mt-3">
+              <button
+                className="px-3 py-1 rounded-md text-helper text-secondary hover:text-primary hover:bg-elevated transition-colors"
+                onClick={() => setRenaming(null)}
+              >
+                取消
+              </button>
+              <button
+                className="px-3 py-1 rounded-md text-helper font-medium text-white bg-accent hover:bg-accent-hover transition-colors"
+                onClick={() => {
+                  if (renameValue.trim() && activeServerId) {
+                    rename(activeServerId, renaming, renameValue.trim());
+                  }
+                  setRenaming(null);
+                }}
+              >
+                确定
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -212,22 +337,31 @@ function ToolButton({
   title,
   onClick,
   highlight,
+  disabled,
+  danger,
   children,
 }: {
   title: string;
   onClick: () => void;
   highlight?: boolean;
+  disabled?: boolean;
+  danger?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <button
       className={`w-6 h-6 rounded flex items-center justify-center transition-colors duration-150 ${
-        highlight
+        disabled
+          ? "text-disabled cursor-not-allowed"
+          : danger
+          ? "text-tertiary hover:text-danger hover:bg-danger-soft"
+          : highlight
           ? "text-accent bg-accent-soft"
           : "text-tertiary hover:text-primary hover:bg-elevated"
       }`}
       onClick={onClick}
       title={title}
+      disabled={disabled}
     >
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
         {children}

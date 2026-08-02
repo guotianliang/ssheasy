@@ -16,6 +16,15 @@ use super::error_translate;
 use crate::events;
 use crate::ssh::hostkey::{self, HostKeyDecision};
 
+/// 终端状态栏信息（user@host:路径）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStatusInfo {
+    pub user: String,
+    pub host: String,
+    pub cwd: String,
+}
+
 /// 构建兼容老服务器的算法配置（在默认列表末尾追加 legacy 算法）
 pub fn legacy_preferred() -> Preferred {
     let mut default_kex: Vec<kex::Name> = Preferred::DEFAULT.kex.to_vec();
@@ -168,6 +177,11 @@ pub struct SessionHandle {
     pub server_id: String,
     pub input_tx: mpsc::UnboundedSender<Vec<u8>>,
     pub resize_tx: mpsc::UnboundedSender<(u32, u32)>,
+    /// 状态栏信息（user@host:路径），由 I/O task 监听输出更新
+    pub status: Arc<tokio::sync::Mutex<SessionStatusInfo>>,
+    /// 状态栏变化通知通道（receiver 由 manager 持有并转发到前端）
+    pub status_tx: mpsc::UnboundedSender<SessionStatusInfo>,
+    pub status_rx: Option<mpsc::UnboundedReceiver<SessionStatusInfo>>,
 }
 
 impl SessionHandle {
@@ -362,7 +376,17 @@ pub async fn connect(
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u32, u32)>();
 
+    // 状态栏跟踪：解析 shell 输出中的提示符/路径
+    let status = Arc::new(tokio::sync::Mutex::new(SessionStatusInfo {
+        user: config.username.clone(),
+        host: config.host.clone(),
+        cwd: String::new(),
+    }));
+    let (status_tx, status_rx) = mpsc::unbounded_channel::<SessionStatusInfo>();
+
     // 启动 I/O 循环 task
+    let io_status = status.clone();
+    let io_status_tx = status_tx.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -380,6 +404,41 @@ pub async fn connect(
                 msg = channel.wait() => {
                     match msg {
                         Some(ChannelMsg::Data { data }) => {
+                            // 状态解析：从输出中提取 user@host 提示符和 cwd
+                            let mut info = io_status.lock().await;
+                            let mut changed = false;
+
+                            let text = String::from_utf8_lossy(&data).to_string();
+
+                            // 1) 解析 cwd：形如  path$
+                            if let Some(path) = extract_cwd(&text) {
+                                info.cwd = path;
+                                changed = true;
+                            }
+                            // 2) 解析 user@host
+                            if let Some((u, h)) = extract_userhost(&text) {
+                                if u != info.user || h != info.host {
+                                    info.user = u;
+                                    info.host = h;
+                                    changed = true;
+                                }
+                            }
+
+                            if changed {
+                                // 推送状态栏变化（克隆发送，避免持锁）
+                                let snapshot = SessionStatusInfo {
+                                    user: info.user.clone(),
+                                    host: info.host.clone(),
+                                    cwd: info.cwd.clone(),
+                                };
+                                drop(info);
+                                if io_status_tx.send(snapshot).is_err() {
+                                    // 接收端已关闭，忽略
+                                }
+                            } else {
+                                drop(info);
+                            }
+
                             let text = String::from_utf8_lossy(&data).to_string();
                             if output_tx.send(text).is_err() {
                                 break;
@@ -402,5 +461,35 @@ pub async fn connect(
         server_id,
         input_tx,
         resize_tx,
+        status,
+        status_tx,
+        status_rx: Some(status_rx),
     })
+}
+
+/// 从输出中提取 cwd：匹配形如  /path/to/dir 的路径
+fn extract_cwd(text: &str) -> Option<String> {
+    // 匹配形如：` /var/log`（末尾空格 + 斜杠路径 + 空格/行尾）
+    // 也兼容 `~` 家目录显示
+    let re = regex::Regex::new(r#"(?:^|[\r\n])\s+((?:/|~)[^\s$#]*[^\s$#/]?)\s*[\r\n]?$"#).unwrap();
+    if let Some(cap) = re.captures(text) {
+        let path = cap.get(1).unwrap().as_str().trim();
+        if path.len() > 1 {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+/// 从输出中提取 user@host：匹配形如  user@host:~$ 的提示符
+fn extract_userhost(text: &str) -> Option<(String, String)> {
+    let re = regex::Regex::new(r"([\w.-]+)@([\w.-]+):").unwrap();
+    if let Some(cap) = re.captures(text) {
+        let user = cap.get(1).unwrap().as_str().to_string();
+        let host = cap.get(2).unwrap().as_str().to_string();
+        if user == "root" || user == "user" || !user.is_empty() {
+            return Some((user, host));
+        }
+    }
+    None
 }

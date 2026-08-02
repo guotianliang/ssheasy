@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use std::path::Path as StdPath;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use russh::client;
 use russh::keys::key::PrivateKeyWithHashAlg;
@@ -220,6 +220,98 @@ pub fn is_previewable(filename: &str) -> bool {
             | "sh" | "py" | "js" | "ts" | "go" | "rs" | "java" | "c"
             | "cpp" | "h" | "properties" | "toml"
     )
+}
+
+/// 读取远程文件内容（base64 编码，用于下载）
+/// 限制 200MB 防止内存耗尽
+pub async fn read_file_base64(sftp: &SftpSession, path: &str) -> Result<FileDownload, String> {
+    let stat = sftp
+        .metadata(path)
+        .await
+        .map_err(|e| format!("获取文件信息失败: {}", e))?;
+
+    let size = stat.len();
+    if stat.file_type().is_dir() {
+        return Err("这是目录，不是文件".into());
+    }
+    if size > 200 * 1024 * 1024 {
+        return Err(format!("文件 {} MB 超过下载上限 200MB", size / 1024 / 1024));
+    }
+
+    let mut file = sftp
+        .open(path)
+        .await
+        .map_err(|e| format!("打开文件失败: {}", e))?;
+
+    let mut buf = Vec::with_capacity(size as usize);
+    file.read_to_end(&mut buf)
+        .await
+        .map_err(|e| format!("读取文件失败: {}", e))?;
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+    Ok(FileDownload {
+        name: StdPath::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("download")
+            .to_string(),
+        content_base64: b64,
+        size,
+    })
+}
+
+/// 上传本地文件到远程路径（base64 解码写入）
+/// 限制 200MB
+pub async fn write_file_base64(
+    sftp: &SftpSession,
+    remote_path: &str,
+    content_base64: &str,
+) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(content_base64)
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+
+    if bytes.len() > 200 * 1024 * 1024 {
+        return Err(format!("文件 {} MB 超过上传上限 200MB", bytes.len() / 1024 / 1024));
+    }
+
+    let mut file = sftp
+        .create(remote_path)
+        .await
+        .map_err(|e| format!("创建远程文件失败: {}", e))?;
+    file.write_all(&bytes)
+        .await
+        .map_err(|e| format!("写入文件失败: {}", e))?;
+    file.flush()
+        .await
+        .map_err(|e| format!("写入文件失败: {}", e))?;
+    drop(file);
+    Ok(())
+}
+
+/// 删除远程文件
+pub async fn delete_file(sftp: &SftpSession, path: &str) -> Result<(), String> {
+    sftp.remove_file(path)
+        .await
+        .map_err(|e| format!("删除文件失败: {}", e))
+}
+
+/// 重命名远程文件/目录
+pub async fn rename_entry(sftp: &SftpSession, from: &str, to: &str) -> Result<(), String> {
+    sftp.rename(from, to)
+        .await
+        .map_err(|e| format!("重命名失败: {}", e))
+}
+
+/// 下载结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDownload {
+    pub name: String,
+    pub content_base64: String,
+    pub size: u64,
 }
 
 /// 将 unix 时间戳格式化为本地可读时间

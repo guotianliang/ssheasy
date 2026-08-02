@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { FileEntry, FileContent } from "@/types/sftp";
+import type { FileEntry, FileContent, FileDownload } from "@/types/sftp";
 
 export const sftpService = {
   listDir: (serverId: string, path: string) =>
@@ -11,4 +11,16 @@ export const sftpService = {
 
   readFile: (serverId: string, path: string) =>
     invoke<FileContent>("sftp_read_file", { serverId, path }),
+
+  download: (serverId: string, path: string) =>
+    invoke<FileDownload>("sftp_download", { serverId, path }),
+
+  upload: (serverId: string, path: string, contentBase64: string) =>
+    invoke<void>("sftp_upload", { serverId, path, contentBase64 }),
+
+  remove: (serverId: string, path: string) =>
+    invoke<void>("sftp_delete", { serverId, path }),
+
+  rename: (serverId: string, from: string, to: string) =>
+    invoke<void>("sftp_rename", { serverId, from, to }),
 };

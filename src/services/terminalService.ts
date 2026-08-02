@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { SessionStatusInfo } from "@/types/terminal";
 
 export const terminalService = {
   connect: (serverId: string) =>
@@ -12,4 +13,7 @@ export const terminalService = {
 
   close: (sessionId: string) =>
     invoke<void>("terminal_close", { sessionId }),
+
+  status: (sessionId: string) =>
+    invoke<SessionStatusInfo>("terminal_status", { sessionId }),
 };

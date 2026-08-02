@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 
-use super::session::{self, ConnectConfig, SessionHandle};
+use super::session::{self, ConnectConfig, SessionHandle, SessionStatusInfo};
 use crate::events;
 
 /// 连接池：管理所有活跃 SSH 会话
@@ -31,7 +31,7 @@ impl ConnectionManager {
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<String>();
 
         // 建立连接（内部会 spawn I/O task）
-        let handle = session::connect(
+        let mut handle = session::connect(
             self.app_handle.clone(),
             session_id.clone(),
             server_id.to_string(),
@@ -56,6 +56,22 @@ impl ConnectionManager {
             }
         });
 
+        // 启动状态栏推送 task：监听 status 变化 → emit 到前端
+        let app_handle2 = self.app_handle.clone();
+        let sid2 = session_id.clone();
+        let mut status_rx = handle.status_rx.take().unwrap(); // 从 handle 取出 receiver
+        tokio::spawn(async move {
+            while let Some(info) = status_rx.recv().await {
+                let _ = app_handle2.emit(
+                    events::SESSION_STATUS,
+                    serde_json::json!({
+                        "sessionId": sid2,
+                        "info": info
+                    }),
+                );
+            }
+        });
+
         // 启动心跳检测
         self.spawn_heartbeat(&handle);
 
@@ -72,6 +88,30 @@ impl ConnectionManager {
         );
 
         Ok(session_id)
+    }
+
+    /// 查询会话当前状态（状态栏用）
+    pub fn get_status(&self, session_id: &str) -> Result<SessionStatusInfo, String> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+        // 触发一次主动探测（拉取最新 cwd）
+        let _ = session.status_tx.send(SessionStatusInfo {
+            user: String::new(),
+            host: String::new(),
+            cwd: String::new(),
+        });
+        // 返回当前快照（同步读取，try_lock 失败则返回空）
+        let guard = session.status.try_lock();
+        match guard {
+            Ok(g) => Ok(g.clone()),
+            Err(_) => Ok(SessionStatusInfo {
+                user: String::new(),
+                host: String::new(),
+                cwd: String::new(),
+            }),
+        }
     }
 
     /// 向会话写入数据
@@ -105,6 +145,13 @@ impl ConnectionManager {
                 }),
             );
         }
+    }
+
+    /// 获取会话所属的 server_id（用于联动清理 SFTP 会话）
+    pub fn session_server_id(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .get(session_id)
+            .map(|s| s.server_id.clone())
     }
 
     /// 心跳检测：定期发送空数据，连续失败则通知断线

@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { EVENTS } from "@/types/events";
-import type { TerminalOutputEvent, ConnectionStatusEvent } from "@/types/terminal";
+import type { TerminalOutputEvent, ConnectionStatusEvent, SessionStatusEvent } from "@/types/terminal";
 import type { HostKeyVerifyEvent } from "@/types/hostkey";
 import { useServerStore } from "@/stores/useServerStore";
 import { useTerminalStore } from "@/stores/useTerminalStore";
@@ -48,6 +48,13 @@ export function useSSHEvents(
         })
       );
     }
+
+    // 状态栏信息推送（user@host:路径）
+    unlisteners.push(
+      listen<SessionStatusEvent>(EVENTS.SESSION_STATUS, (event) => {
+        useTerminalStore.getState().updateStatus(event.payload.sessionId, event.payload.info);
+      })
+    );
 
     return () => {
       unlisteners.forEach((p) => p.then((unlisten) => unlisten()));

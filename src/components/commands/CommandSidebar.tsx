@@ -11,12 +11,21 @@ import { parseTemplateVars } from "@/types/command";
 import type { CommandTemplate } from "@/types/command";
 
 export function CommandSidebar() {
-  const { commands, deleteCommand } = useCommandStore();
-  const activeSessionId = useTerminalStore((s) => s.activeSessionId);
+  const { commands, deleteCommand, recentCommands, fetchRecent } = useCommandStore();
+  const { sessions, activeSessionId } = useTerminalStore();
   const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [varModal, setVarModal] = useState<{ cmd: CommandTemplate; mode: "insert" | "execute" } | null>(null);
   const [noSessionHint, setNoSessionHint] = useState(false);
+  const [showRecent, setShowRecent] = useState(true);
+
+  // 当前活跃服务器：切换时拉取最近使用
+  const activeServerId = sessions.find((s) => s.sessionId === activeSessionId)?.serverId ?? null;
+  useEffect(() => {
+    if (activeServerId) {
+      fetchRecent(activeServerId);
+    }
+  }, [activeServerId, fetchRecent]);
 
   // 按分类分组 + 搜索过滤；自定义命令的分组排在内置命令前面
   const grouped = useMemo(() => {
@@ -69,9 +78,24 @@ export function CommandSidebar() {
         .sessions.find((s) => s.sessionId === activeSessionId)?.serverId;
       if (serverId) {
         useLogStore.getState().record(serverId, renderedCmd);
+        useCommandStore.getState().bumpRecent(serverId, renderedCmd);
       }
     } else {
       terminalService.sendInput(activeSessionId, renderedCmd);
+    }
+  };
+
+  // 最近使用：点击执行（不带模板变量直接执行）
+  const handleRecentClick = (command: string) => {
+    if (!activeSessionId) {
+      setNoSessionHint(true);
+      setTimeout(() => setNoSessionHint(false), 2500);
+      return;
+    }
+    terminalService.sendInput(activeSessionId, command + "\n");
+    if (activeServerId) {
+      useLogStore.getState().record(activeServerId, command);
+      useCommandStore.getState().bumpRecent(activeServerId, command);
     }
   };
 
@@ -124,6 +148,47 @@ export function CommandSidebar() {
           />
         </div>
       </div>
+
+      {/* 最近使用（按当前服务器） */}
+      {activeSessionId && recentCommands.length > 0 && !search && (
+        <div className="px-2 pt-2 pb-1 flex-shrink-0">
+          <div
+            className="flex items-center justify-between px-1 mb-1 cursor-pointer select-none"
+            onClick={() => setShowRecent(!showRecent)}
+          >
+            <span className="text-label font-medium text-tertiary uppercase tracking-wide">
+              最近使用
+            </span>
+            <svg
+              width="8"
+              height="8"
+              viewBox="0 0 10 10"
+              className={`text-disabled transition-transform duration-150 ${showRecent ? "rotate-180" : ""}`}
+            >
+              <path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </div>
+          {showRecent && (
+            <div className="space-y-0.5">
+              {recentCommands.slice(0, 6).map((r) => (
+                <button
+                  key={`${r.serverId}-${r.command}-${r.executedAt}`}
+                  className="flex items-center gap-1.5 w-full px-1.5 py-1 rounded-md text-left group hover:bg-elevated transition-colors duration-100"
+                  onClick={() => handleRecentClick(r.command)}
+                  title={`执行：${r.command}`}
+                >
+                  <svg width="9" height="9" viewBox="0 0 12 12" fill="none" className="text-disabled flex-shrink-0">
+                    <path d="M2.5 2L8.5 6L2.5 10V2Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+                  </svg>
+                  <span className="truncate text-helper text-secondary group-hover:text-primary font-mono transition-colors">
+                    {r.command}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 命令列表 */}
       <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
