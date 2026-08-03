@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -264,18 +264,12 @@ pub fn load_key_with_legacy_fallback(
                 );
             }
 
-            // 3) 用系统 openssl 解密到临时文件
-            let tmp_path = std::env::temp_dir().join(format!(
-                "ssheasy_key_{}.pem",
-                uuid::Uuid::new_v4().simple()
-            ));
-
+            // 3) 用系统 openssl 解密：输出到 stdout（内存），不写中间文件。
+            //    失败时 openssl 不会产出任何文件，故失败路径完全不落盘。
             let output = Command::new("openssl")
                 .arg("pkey")
                 .arg("-in")
                 .arg(&expanded)
-                .arg("-out")
-                .arg(&tmp_path)
                 .arg("-passin")
                 .arg("env:SSHEASY_KEY_PASS")
                 .env("SSHEASY_KEY_PASS", pass)
@@ -284,25 +278,45 @@ pub fn load_key_with_legacy_fallback(
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                // 清理可能产生的临时文件（先清零再删）
-                zeroize_file(&tmp_path);
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(if stderr.contains("bad decrypt") || stderr.contains("Could not read")
-                {
+                return Err(if stderr.contains("bad decrypt") || stderr.contains("Could not read") {
                     "密钥密码不正确，无法解密私钥。".into()
                 } else {
                     format!("openssl 解密私钥失败: {}", stderr.trim())
                 });
             }
 
-            // 解密后的文件仅属主可读写
-            #[cfg(unix)]
-            let _ = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600));
-
-            // 4) 加载已解密的临时密钥（无密码）
+            // 4) russh 当前版本（0.49.2）只接受「基于文件路径」的密钥加载，
+            //    因此解密后的明文 PEM 仍需短暂落到一个临时文件。
+            //    为把明文窗口压到最小：创建时即指定 0o600（无 0o644 中间态），
+            //    加载完成后立刻清零内容再删除。
+            //    说明：彻底「不落盘」需要升级 russh 以支持内存加载，属后续可选项。
+            let decrypted = output.stdout;
+            let tmp_path = std::env::temp_dir().join(format!(
+                "ssheasy_key_{}.pem",
+                uuid::Uuid::new_v4().simple()
+            ));
+            {
+                #[cfg(unix)]
+                let mut f = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .mode(0o600)
+                    .open(&tmp_path)
+                    .map_err(|e| format!("创建临时密钥文件失败: {}", e))?;
+                #[cfg(not(unix))]
+                let mut f = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&tmp_path)
+                    .map_err(|e| format!("创建临时密钥文件失败: {}", e))?;
+                use std::io::Write;
+                f.write_all(&decrypted)
+                    .map_err(|e| format!("写入临时密钥文件失败: {}", e))?;
+                let _ = f.flush();
+            }
+            // 加载（已是解密后的 PEM，无需密码）
             let result = load_secret_key(&tmp_path, None);
-
-            // 5) 先覆盖临时文件内容（清零解密后的私钥明文），再删除
+            // 清零临时文件内容（解密后的私钥明文），再删除
             zeroize_file(&tmp_path);
             let _ = std::fs::remove_file(&tmp_path);
 
