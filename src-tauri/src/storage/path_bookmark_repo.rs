@@ -23,7 +23,10 @@ pub struct PathBookmarkInput {
 }
 
 impl Database {
-    pub fn list_path_bookmarks(&self, server_id: &str) -> Result<Vec<PathBookmark>, rusqlite::Error> {
+    pub fn list_path_bookmarks(
+        &self,
+        server_id: &str,
+    ) -> Result<Vec<PathBookmark>, rusqlite::Error> {
         let mut stmt = self.conn.prepare(
             "SELECT id, server_id, path, label, sort_order, created_at FROM path_bookmarks WHERE server_id = ?1 ORDER BY sort_order, created_at DESC",
         )?;
@@ -40,7 +43,10 @@ impl Database {
         rows.collect()
     }
 
-    pub fn insert_path_bookmark(&self, input: &PathBookmarkInput) -> Result<PathBookmark, rusqlite::Error> {
+    pub fn insert_path_bookmark(
+        &self,
+        input: &PathBookmarkInput,
+    ) -> Result<PathBookmark, rusqlite::Error> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         self.conn.execute(

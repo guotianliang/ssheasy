@@ -1,0 +1,26 @@
+name: 问题反馈
+description: 报告可复现的问题（请先脱敏）
+body:
+  - type: markdown
+    attributes:
+      value: 请勿上传密码、私钥、数据库或包含秘密的日志。漏洞请先阅读 SECURITY.md。
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      description: 应用版本、macOS 版本、Apple Silicon 或 Intel
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 说明执行了什么操作，以及远程系统类型；不要填写真实服务器地址。
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 期望与实际结果
+    validations:
+      required: true

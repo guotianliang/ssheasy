@@ -1,7 +1,10 @@
 import { useState, useMemo, useEffect } from "react";
 import { useCommandStore } from "@/stores/useCommandStore";
 import { useTerminalStore } from "@/stores/useTerminalStore";
-import { useLogStore } from "@/stores/useLogStore";
+import { confirm } from "@tauri-apps/plugin-dialog";
+import { runAction } from "@/lib/errors";
+import { isDangerous } from "@/lib/shell";
+import { useSftpStore } from "@/stores/useSftpStore";
 import { terminalService } from "@/services/terminalService";
 import { CategorySection } from "./CategorySection";
 import { AddCommandModal } from "./AddCommandModal";
@@ -14,6 +17,7 @@ export function CommandSidebar() {
   const { commands, deleteCommand, recentCommands, fetchRecent } = useCommandStore();
   const { sessions, activeSessionId } = useTerminalStore();
   const [search, setSearch] = useState("");
+  const [editing, setEditing] = useState<CommandTemplate | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [varModal, setVarModal] = useState<{ cmd: CommandTemplate; mode: "insert" | "execute" } | null>(null);
   const [noSessionHint, setNoSessionHint] = useState(false);
@@ -65,55 +69,25 @@ export function CommandSidebar() {
     }
   };
 
-  const executeOrInsert = (renderedCmd: string, mode: "insert" | "execute") => {
-    if (!activeSessionId) {
+  const executeOrInsert = async (renderedCmd: string, mode: "insert" | "execute") => {
+    if (!activeSessionId || sessions.find((s) => s.sessionId === activeSessionId)?.status !== "connected") {
       setNoSessionHint(true);
       setTimeout(() => setNoSessionHint(false), 2500);
       return;
     }
-    if (mode === "execute") {
-      terminalService.sendInput(activeSessionId, renderedCmd + "\n");
-      const serverId = useTerminalStore
-        .getState()
-        .sessions.find((s) => s.sessionId === activeSessionId)?.serverId;
-      if (serverId) {
-        useLogStore.getState().record(serverId, renderedCmd);
-        useCommandStore.getState().bumpRecent(serverId, renderedCmd);
+    if (mode === "execute" && isDangerous(renderedCmd) && !await confirm(`该命令会修改或删除数据，确认发送？\n\n${renderedCmd}`, { title: "确认执行命令", kind: "warning" })) return;
+    await runAction(async () => {
+      if (mode === "execute") {
+        await terminalService.execute(activeSessionId, renderedCmd);
+        if (activeServerId) useCommandStore.getState().bumpRecent(activeServerId, renderedCmd);
+      } else {
+        await terminalService.sendInput(activeSessionId, renderedCmd);
       }
-    } else {
-      terminalService.sendInput(activeSessionId, renderedCmd);
-    }
+      useSftpStore.getState().setViewMode("terminal");
+    });
   };
 
-  // 高危命令判定（与后端 log_cmds assess_risk 的高危列表保持一致）
-  const isDangerous = (cmd: string): boolean => {
-    const c = cmd.toLowerCase();
-    return [
-      "rm -rf", "rm -fr", "mkfs", "dd if=", "shutdown", "reboot", "init 0",
-      "init 6", "drop database", "truncate ", "fdisk", "parted", "kill -9",
-      "killall", "> /dev/sd", ":(){",
-    ].some((p) => c.includes(p));
-  };
-
-  // 最近使用：点击执行（不带模板变量直接执行）
-  const handleRecentClick = (command: string) => {
-    if (!activeSessionId) {
-      setNoSessionHint(true);
-      setTimeout(() => setNoSessionHint(false), 2500);
-      return;
-    }
-    // 高危命令二次确认，避免一键重放 rm -rf 等危险操作
-    if (isDangerous(command)) {
-      if (!window.confirm(`该命令存在高危风险，确认执行？\n\n${command}`)) {
-        return;
-      }
-    }
-    terminalService.sendInput(activeSessionId, command + "\n");
-    if (activeServerId) {
-      useLogStore.getState().record(activeServerId, command);
-      useCommandStore.getState().bumpRecent(activeServerId, command);
-    }
-  };
+  const handleRecentClick = (command: string) => { void executeOrInsert(command, "execute"); };
 
   // Cmd+K 聚焦搜索框
   useEffect(() => {
@@ -135,7 +109,7 @@ export function CommandSidebar() {
   return (
     <div className="flex flex-col h-full">
       {/* 头部 */}
-      <div className="flex items-center justify-between px-3 h-10 border-b border-border-subtle flex-shrink-0">
+      <div className="flex items-center justify-between px-3 h-10 border-b border-border-subtle shrink-0">
         <span className="text-helper font-medium text-secondary uppercase tracking-wide">快捷命令</span>
         <button
           className="w-5 h-5 rounded flex items-center justify-center text-tertiary hover:text-accent hover:bg-accent-soft transition-all duration-150"
@@ -149,7 +123,7 @@ export function CommandSidebar() {
       </div>
 
       {/* 搜索框 */}
-      <div className="px-2.5 py-2 flex-shrink-0">
+      <div className="px-2.5 py-2 shrink-0">
         <div className="relative">
           <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" width="11" height="11" viewBox="0 0 12 12" fill="none">
             <circle cx="5" cy="5" r="3.5" stroke="currentColor" strokeWidth="1.2" />
@@ -166,8 +140,8 @@ export function CommandSidebar() {
       </div>
 
       {/* 最近使用（按当前服务器） */}
-      {activeSessionId && recentCommands.length > 0 && !search && (
-        <div className="px-2 pt-2 pb-1 flex-shrink-0">
+      {activeSessionId && recentCommands.length > 0 && useCommandStore.getState().recentServerId === activeServerId && !search && (
+        <div className="px-2 pt-2 pb-1 shrink-0">
           <div
             className="flex items-center justify-between px-1 mb-1 cursor-pointer select-none"
             onClick={() => setShowRecent(!showRecent)}
@@ -193,7 +167,7 @@ export function CommandSidebar() {
                   onClick={() => handleRecentClick(r.command)}
                   title={`执行：${r.command}`}
                 >
-                  <svg width="9" height="9" viewBox="0 0 12 12" fill="none" className="text-disabled flex-shrink-0">
+                  <svg width="9" height="9" viewBox="0 0 12 12" fill="none" className="text-disabled shrink-0">
                     <path d="M2.5 2L8.5 6L2.5 10V2Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
                   </svg>
                   <span className="truncate text-helper text-secondary group-hover:text-primary font-mono transition-colors">
@@ -214,7 +188,8 @@ export function CommandSidebar() {
             name={category}
             commands={cmds}
             onCommand={handleCommand}
-            onDelete={deleteCommand}
+            onDelete={(id) => { void runAction(() => deleteCommand(id)); }}
+            onEdit={setEditing}
           />
         ))}
         {Object.keys(grouped).length === 0 && (
@@ -228,7 +203,7 @@ export function CommandSidebar() {
       <PathBookmarkPanel />
 
       {/* 底部提示 */}
-      <div className="px-3 py-2.5 border-t border-border-subtle flex-shrink-0 space-y-1">
+      <div className="px-3 py-2.5 border-t border-border-subtle shrink-0 space-y-1">
         {noSessionHint && (
           <div className="text-label text-warning bg-warning-soft border border-warning/20 rounded px-2 py-1 animate-fade-in">
             请先在左侧选择服务器并连接
@@ -251,6 +226,7 @@ export function CommandSidebar() {
 
       {/* 弹窗 */}
       {showAdd && <AddCommandModal onClose={() => setShowAdd(false)} />}
+      {editing && <AddCommandModal command={editing} onClose={() => setEditing(null)} />}
       {varModal && (
         <TemplateVarInput
           cmd={varModal.cmd}

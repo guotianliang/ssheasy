@@ -42,7 +42,16 @@ impl Database {
         rows.collect()
     }
 
-    pub fn insert_command(&self, input: &CommandInput, is_builtin: bool) -> Result<CommandTemplate, rusqlite::Error> {
+    pub fn insert_command(
+        &self,
+        input: &CommandInput,
+        is_builtin: bool,
+    ) -> Result<CommandTemplate, rusqlite::Error> {
+        if input.cmd.trim().is_empty() || input.category.trim().is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "命令和分组不能为空".into(),
+            ));
+        }
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         self.conn.execute(
@@ -62,14 +71,17 @@ impl Database {
 
     pub fn update_command(&self, id: &str, input: &CommandInput) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "UPDATE commands SET category=?2, cmd=?3, description=?4 WHERE id=?1",
+            "UPDATE commands SET category=?2, cmd=?3, description=?4 WHERE id=?1 AND is_builtin=0",
             params![id, input.category, input.cmd, input.description],
         )?;
         Ok(())
     }
 
     pub fn delete_command(&self, id: &str) -> Result<(), rusqlite::Error> {
-        self.conn.execute("DELETE FROM commands WHERE id = ?1 AND is_builtin = 0", params![id])?;
+        self.conn.execute(
+            "DELETE FROM commands WHERE id = ?1 AND is_builtin = 0",
+            params![id],
+        )?;
         Ok(())
     }
 
@@ -86,7 +98,7 @@ impl Database {
 
         let builtins: Vec<(&str, &str, &str)> = vec![
             ("文件操作", "ls -lah", "列出所有文件(含隐藏)"),
-            ("文件操作", "cd /path", "切换目录"),
+            ("文件操作", "cd {{目录路径}}", "切换目录"),
             ("文件操作", "cat {{文件路径}}", "查看文件内容"),
             ("文件操作", "tail -f {{日志路径}}", "实时追踪日志"),
             ("文件操作", "head -n 50 {{文件路径}}", "查看文件前50行"),
@@ -98,8 +110,16 @@ impl Database {
             ("搜索查找", "which {{命令名}}", "查找命令位置"),
             ("编辑文件", "vim {{文件路径}}", "Vim编辑"),
             ("编辑文件", "nano {{文件路径}}", "Nano编辑(更简单)"),
-            ("编辑文件", "sed -i 's/{{旧文本}}/{{新文本}}/g' {{文件路径}}", "批量替换文本"),
-            ("编辑文件", "echo '{{内容}}' >> {{文件路径}}", "追加内容到文件"),
+            (
+                "编辑文件",
+                "sed -i 's/{{旧文本}}/{{新文本}}/g' {{文件路径}}",
+                "批量替换文本",
+            ),
+            (
+                "编辑文件",
+                "echo '{{内容}}' >> {{文件路径}}",
+                "追加内容到文件",
+            ),
             ("系统信息", "top -bn1 | head -20", "查看进程/CPU"),
             ("系统信息", "df -h", "磁盘使用情况"),
             ("系统信息", "free -h", "内存使用情况"),

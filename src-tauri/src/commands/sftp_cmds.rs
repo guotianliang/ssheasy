@@ -4,7 +4,6 @@ use std::sync::Arc;
 use russh_sftp::client::SftpSession;
 use tauri::{AppHandle, State};
 
-use crate::ssh::session::build_config_from_server;
 use crate::ssh::sftp::{self, FileContent, FileDownload, FileEntry};
 use crate::AppState;
 
@@ -13,18 +12,7 @@ async fn get_sftp_session(
     state: &State<'_, AppState>,
     server_id: &str,
 ) -> Result<Arc<SftpSession>, String> {
-    let config = {
-        let db = state.db.lock().await;
-        let server = db
-            .get_server(server_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "服务器不存在".to_string())?;
-        build_config_from_server(&server)?
-    };
-
-    // SftpManager 内部自锁：建连在锁外，不阻塞其他文件操作
-    let manager = state.sftp_manager.lock().await;
-    manager.session(server_id, &config).await
+    state.sftp_manager.session(server_id).await
 }
 
 /// 列出指定目录的内容（懒加载 SFTP 会话）
@@ -48,7 +36,7 @@ pub async fn sftp_home(state: State<'_, AppState>, server_id: String) -> Result<
 /// 关闭某服务器的 SFTP 会话
 #[tauri::command]
 pub async fn sftp_close(state: State<'_, AppState>, server_id: String) -> Result<(), String> {
-    let manager = state.sftp_manager.lock().await;
+    let manager = &state.sftp_manager;
     manager.close(&server_id).await;
     Ok(())
 }
@@ -64,7 +52,7 @@ pub async fn sftp_read_file(
     sftp::read_text_file(&session, &path).await
 }
 
-/// 下载文件：流式写入本地 dest_path（限 200MB，避免整块入内存）
+/// 下载文件：分块写入临时文件，完成后替换 dest_path
 /// 下载进度通过 sftp:progress 事件推送
 #[tauri::command]
 pub async fn sftp_download(
@@ -75,27 +63,52 @@ pub async fn sftp_download(
     dest_path: String,
 ) -> Result<FileDownload, String> {
     let session = get_sftp_session(&state, &server_id).await?;
-    let size = sftp::download_to_file(&session, &app, &server_id, &path, &dest_path).await?;
+    let size = sftp::download_to_file(&session, Some(&app), &server_id, &path, &dest_path).await?;
     let name = StdPath::new(&path)
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("download")
         .to_string();
+    state
+        .db
+        .lock()
+        .await
+        .insert_log(
+            &server_id,
+            &format!("SFTP 下载完成: {path} ({size} 字节)"),
+            "low",
+        )
+        .map_err(|e| e.to_string())?;
     Ok(FileDownload { name, size })
 }
 
-/// 上传文件（base64 内容写入远程路径）
+/// 上传文件（从本地路径分块读取）
 /// overwrite=false 时若远程已存在同名文件，返回 "FILE_EXISTS" 由前端确认后重试
 #[tauri::command]
 pub async fn sftp_upload(
     state: State<'_, AppState>,
+    app: AppHandle,
     server_id: String,
     path: String,
-    content_base64: String,
+    local_path: String,
     overwrite: bool,
 ) -> Result<(), String> {
     let session = get_sftp_session(&state, &server_id).await?;
-    sftp::write_file_base64(&session, &path, &content_base64, overwrite).await
+    sftp::upload_from_file(
+        &session,
+        Some(&app),
+        &server_id,
+        &path,
+        &local_path,
+        overwrite,
+    )
+    .await?;
+    state
+        .db
+        .lock()
+        .await
+        .insert_log(&server_id, &format!("SFTP 上传完成: {path}"), "medium")
+        .map_err(|e| e.to_string())
 }
 
 /// 删除远程文件或目录（目录递归删除其内容与自身）
@@ -106,7 +119,13 @@ pub async fn sftp_delete(
     path: String,
 ) -> Result<(), String> {
     let session = get_sftp_session(&state, &server_id).await?;
-    sftp::remove_path(&session, &path).await
+    sftp::remove_path(&session, &path).await?;
+    state
+        .db
+        .lock()
+        .await
+        .insert_log(&server_id, &format!("SFTP 删除完成: {path}"), "high")
+        .map_err(|e| e.to_string())
 }
 
 /// 重命名远程文件/目录
@@ -118,5 +137,34 @@ pub async fn sftp_rename(
     to: String,
 ) -> Result<(), String> {
     let session = get_sftp_session(&state, &server_id).await?;
-    sftp::rename_entry(&session, &from, &to).await
+    sftp::rename_entry(&session, &from, &to).await?;
+    state
+        .db
+        .lock()
+        .await
+        .insert_log(
+            &server_id,
+            &format!("SFTP 重命名完成: {from} → {to}"),
+            "medium",
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sftp_mkdir(
+    state: State<'_, AppState>,
+    server_id: String,
+    path: String,
+) -> Result<(), String> {
+    let session = get_sftp_session(&state, &server_id).await?;
+    session
+        .create_dir(&path)
+        .await
+        .map_err(|e| format!("创建目录失败: {e}"))?;
+    state
+        .db
+        .lock()
+        .await
+        .insert_log(&server_id, &format!("SFTP 创建目录: {path}"), "medium")
+        .map_err(|e| e.to_string())
 }

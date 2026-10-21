@@ -15,8 +15,10 @@ export const sftpService = {
   download: (serverId: string, path: string, destPath: string) =>
     invoke<FileDownload>("sftp_download", { serverId, path, destPath }),
 
-  upload: (serverId: string, path: string, contentBase64: string, overwrite: boolean) =>
-    invoke<void>("sftp_upload", { serverId, path, contentBase64, overwrite }),
+  upload: (serverId: string, path: string, localPath: string, overwrite: boolean) =>
+    invoke<void>("sftp_upload", { serverId, path, localPath, overwrite }),
+
+  mkdir: (serverId: string, path: string) => invoke<void>("sftp_mkdir", { serverId, path }),
 
   remove: (serverId: string, path: string) =>
     invoke<void>("sftp_delete", { serverId, path }),

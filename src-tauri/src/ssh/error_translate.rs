@@ -82,7 +82,7 @@ pub fn translate(err: &str, host: &str, port: u16) -> TranslatedError {
             detail: "服务器的身份标识与之前记录的不一致".into(),
             suggestions: vec![
                 "如果服务器重装过系统，这是正常的".into(),
-                "删除 ~/.ssh/known_hosts 中对应行后重试".into(),
+                "向服务器管理员核对指纹后，在 SSHEasy 指纹确认窗口重新信任".into(),
                 "⚠️ 如果没有重装过，可能是中间人攻击，请谨慎".into(),
             ],
         }

@@ -1,6 +1,4 @@
 use std::borrow::Cow;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -8,7 +6,7 @@ use std::time::Duration;
 
 use russh::client;
 use russh::keys::key::PrivateKeyWithHashAlg;
-use russh::keys::load_secret_key;
+use russh::keys::{decode_secret_key, load_secret_key};
 use russh::Preferred;
 use russh::{kex, ChannelMsg, Disconnect};
 use tauri::{AppHandle, Emitter, Manager};
@@ -43,52 +41,42 @@ pub fn legacy_preferred() -> Preferred {
 
 /// SSH 客户端 Handler
 pub struct ClientHandler {
-    pub app: Option<AppHandle>,
+    pub app: AppHandle,
     pub host: String,
     pub port: u16,
-    /// 是否进行交互式 host key 校验（连接测试等场景为 false，直接接受）
-    pub interactive: bool,
 }
 
 impl ClientHandler {
-    pub fn new(app: AppHandle, host: String, port: u16, interactive: bool) -> Self {
-        Self {
-            app: Some(app),
-            host,
-            port,
-            interactive,
-        }
+    pub fn new(app: AppHandle, host: String, port: u16) -> Self {
+        Self { app, host, port }
     }
 }
 
-#[async_trait::async_trait]
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        // 非交互场景（如连接测试）直接接受，不弹窗
-        if !self.interactive {
-            return Ok(true);
+        if server_public_key.certificate().is_some() {
+            return Err(russh::Error::from(std::io::Error::other(
+                "当前版本不支持 SSH 主机证书，请使用主机公钥",
+            )));
         }
-
-        let key_str = server_public_key.to_string();
+        let server_public_key = server_public_key.public_key();
+        let key_str = server_public_key
+            .to_openssh()
+            .map_err(|e| russh::Error::from(std::io::Error::other(e.to_string())))?;
         let fingerprint = server_public_key
-            .fingerprint(ssh_key::HashAlg::Sha256)
+            .fingerprint(russh::keys::HashAlg::Sha256)
             .to_string();
         let host = self.host.clone();
         let port = self.port;
-        let app = match &self.app {
-            Some(a) => a,
-            None => return Ok(true),
-        };
+        let app = &self.app;
 
         // 1) 已知且匹配 → 直接通过
-        if let hostkey::KnownStatus::Trusted =
-            hostkey::check(app, &host, port, &key_str)
-        {
+        if let hostkey::KnownStatus::Trusted = hostkey::check(app, &host, port, &key_str) {
             return Ok(true);
         }
 
@@ -121,9 +109,13 @@ impl client::Handler for ClientHandler {
             _ => HostKeyDecision::Reject,
         };
 
+        if let Some(state) = app.try_state::<crate::AppState>() {
+            state.hostkey_pending.lock().await.remove(&token);
+        }
+
         match decision {
             HostKeyDecision::AcceptAndSave => {
-                let _ = hostkey::add(app, &host, port, &key_str);
+                hostkey::add(app, &host, port, &key_str).map_err(russh::Error::from)?;
                 Ok(true)
             }
             HostKeyDecision::AcceptOnce => Ok(true),
@@ -136,7 +128,7 @@ impl client::Handler for ClientHandler {
 }
 
 /// 连接配置（从前端传入）
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectConfig {
     pub host: String,
@@ -175,6 +167,7 @@ pub fn build_config_from_server(
 
 /// 活跃会话句柄：通过 mpsc 发送输入
 pub struct SessionHandle {
+    pub alive: Arc<std::sync::atomic::AtomicBool>,
     pub session_id: String,
     pub server_id: String,
     /// 底层 russh 客户端句柄（共享，供 SFTP 复用同一条 SSH 连接）。
@@ -185,7 +178,6 @@ pub struct SessionHandle {
     /// 状态栏信息（user@host:路径），由 I/O task 监听输出更新
     pub status: Arc<tokio::sync::Mutex<SessionStatusInfo>>,
     /// 状态栏变化通知通道（receiver 由 manager 持有并转发到前端）
-    pub status_tx: mpsc::UnboundedSender<SessionStatusInfo>,
     pub status_rx: Option<mpsc::UnboundedReceiver<SessionStatusInfo>>,
     /// 关断信号：close_session 发送 true 后，I/O 循环据此退出并真正断开 SSH
     pub shutdown: watch::Sender<bool>,
@@ -205,31 +197,9 @@ impl SessionHandle {
     }
 }
 
-/// 用全 0 覆盖文件内容，避免解密后的私钥明文残留在磁盘（删除前的兜底）
-fn zeroize_file(path: &std::path::Path) {
-    if let Ok(meta) = std::fs::metadata(path) {
-        let len = meta.len();
-        if len == 0 {
-            return;
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(path) {
-            let zeros = [0u8; 4096];
-            let mut written = 0u64;
-            while written < len {
-                let chunk = std::cmp::min(4096, (len - written) as usize);
-                if f.write_all(&zeros[..chunk]).is_err() {
-                    break;
-                }
-                written += chunk as u64;
-            }
-            let _ = f.flush();
-        }
-    }
-}
-
 /// 加载私钥：优先用 russh 直接加载（OpenSSH / PKCS#8 / 无加密 PEM）；
 /// 若失败且文件是 OpenSSL 老式加密 PEM（`Proc-Type: 4,ENCRYPTED`），
-/// 回退到系统 `openssl` 命令解密到临时文件后再加载。
+/// 回退到系统 `openssl` 命令解密到内存后加载。
 pub fn load_key_with_legacy_fallback(
     key_path: &str,
     passphrase: Option<&str>,
@@ -246,7 +216,7 @@ pub fn load_key_with_legacy_fallback(
 
     // 1) 直接尝试
     match load_secret_key(&expanded, passphrase) {
-        Ok(key) => return Ok(key),
+        Ok(key) => Ok(key),
         Err(direct_err) => {
             // 2) 检查是否是 legacy 加密 PEM
             let content = std::fs::read_to_string(&expanded)
@@ -278,66 +248,52 @@ pub fn load_key_with_legacy_fallback(
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(if stderr.contains("bad decrypt") || stderr.contains("Could not read") {
-                    "密钥密码不正确，无法解密私钥。".into()
-                } else {
-                    format!("openssl 解密私钥失败: {}", stderr.trim())
-                });
+                return Err(
+                    if stderr.contains("bad decrypt") || stderr.contains("Could not read") {
+                        "密钥密码不正确，无法解密私钥。".into()
+                    } else {
+                        format!("openssl 解密私钥失败: {}", stderr.trim())
+                    },
+                );
             }
 
-            // 4) russh 当前版本（0.49.2）只接受「基于文件路径」的密钥加载，
-            //    因此解密后的明文 PEM 仍需短暂落到一个临时文件。
-            //    为把明文窗口压到最小：创建时即指定 0o600（无 0o644 中间态），
-            //    加载完成后立刻清零内容再删除。
-            //    说明：彻底「不落盘」需要升级 russh 以支持内存加载，属后续可选项。
-            let decrypted = output.stdout;
-            let tmp_path = std::env::temp_dir().join(format!(
-                "ssheasy_key_{}.pem",
-                uuid::Uuid::new_v4().simple()
-            ));
-            {
-                #[cfg(unix)]
-                let mut f = std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .mode(0o600)
-                    .open(&tmp_path)
-                    .map_err(|e| format!("创建临时密钥文件失败: {}", e))?;
-                #[cfg(not(unix))]
-                let mut f = std::fs::OpenOptions::new()
-                    .create_new(true)
-                    .write(true)
-                    .open(&tmp_path)
-                    .map_err(|e| format!("创建临时密钥文件失败: {}", e))?;
-                use std::io::Write;
-                f.write_all(&decrypted)
-                    .map_err(|e| format!("写入临时密钥文件失败: {}", e))?;
-                let _ = f.flush();
-            }
-            // 加载（已是解密后的 PEM，无需密码）
-            let result = load_secret_key(&tmp_path, None);
-            // 清零临时文件内容（解密后的私钥明文），再删除
-            zeroize_file(&tmp_path);
-            let _ = std::fs::remove_file(&tmp_path);
-
-            result.map_err(|e| format!("解密后的私钥仍无法解析: {}", e))
+            // 已有依赖支持从内存解析，无需创建明文临时文件。
+            let decrypted = String::from_utf8(output.stdout)
+                .map_err(|_| "openssl 输出不是有效的 PEM".to_string())?;
+            decode_secret_key(&decrypted, None).map_err(|e| format!("解密后的私钥仍无法解析: {e}"))
         }
     }
 }
 
-/// 建立 SSH 连接并启动 I/O 循环
-/// 返回 SessionHandle 用于后续交互
-/// output_tx 为原始字节透传通道（xterm.js 原生吃 Uint8Array，避免多字节字符被截断乱码）
+/// Authenticate a private key using the server's RSA signature capabilities.
+pub async fn authenticate_private_key<H: client::Handler>(
+    handle: &mut client::Handle<H>,
+    username: &str,
+    key: russh::keys::PrivateKey,
+) -> Result<client::AuthResult, russh::Error> {
+    let hash = if key.algorithm().is_rsa() {
+        // Servers predating server-sig-algs (e.g. OpenSSH 5.3) need ssh-rsa.
+        // Preserve the strongest advertised SHA-2 choice for modern servers.
+        handle.best_supported_rsa_hash().await?.flatten()
+    } else {
+        None
+    };
+    handle
+        .authenticate_publickey(username, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+        .await
+}
+
+/// 建立 SSH 连接并启动 I/O 循环，返回 SessionHandle 用于后续交互。
+/// output_tx 为原始字节透传通道（xterm.js 原生吃 Uint8Array）。
 pub async fn connect(
     app: AppHandle,
     session_id: String,
     server_id: String,
     config: &ConnectConfig,
     output_tx: mpsc::UnboundedSender<Vec<u8>>,
-    interactive: bool,
 ) -> Result<SessionHandle, error_translate::TranslatedError> {
     let ssh_config = Arc::new(client::Config {
-        inactivity_timeout: Some(Duration::from_secs(60)),
+        inactivity_timeout: None,
         // 真实存活探测：russh 周期性发 SSH 级 keepalive，连续超时后由 channel.wait() 暴露断线
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 3,
@@ -345,84 +301,115 @@ pub async fn connect(
         ..<_>::default()
     });
 
-    let addr = format!("{}:{}", config.host, config.port);
+    let tcp = tokio::time::timeout(
+        Duration::from_secs(12),
+        tokio::net::TcpStream::connect((config.host.as_str(), config.port)),
+    )
+    .await
+    .map_err(|_| error_translate::translate("connection timed out", &config.host, config.port))?
+    .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
 
     // 提前克隆 AppHandle 供 I/O 循环退出时 emit 断线事件（下方 app 会被 ClientHandler 拿走所有权）
     let io_app = app.clone();
 
     // 建立 TCP + SSH 连接
-    let mut handle = client::connect(
-        ssh_config,
-        &addr,
-        ClientHandler::new(app, config.host.clone(), config.port, interactive),
+    let mut handle = tokio::time::timeout(
+        Duration::from_secs(75),
+        client::connect_stream(
+            ssh_config,
+            tcp,
+            ClientHandler::new(app, config.host.clone(), config.port),
+        ),
     )
     .await
+    .map_err(|_| error_translate::translate("SSH handshake timed out", &config.host, config.port))?
     .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
 
-    // 认证
-    let auth_ok = match config.auth_type.as_str() {
-        "password" => {
-            let pwd = config.password.as_deref().unwrap_or("");
-            handle
-                .authenticate_password(&config.username, pwd)
-                .await
-                .map_err(|e| {
-                    error_translate::translate(&e.to_string(), &config.host, config.port)
-                })?
-        }
-        "key" => {
-            let key_path = config.key_path.as_deref().unwrap_or("");
-            let passphrase = config.key_passphrase.as_deref();
-            let key_pair = load_key_with_legacy_fallback(key_path, passphrase).map_err(|e| {
-                error_translate::translate(&e, &config.host, config.port)
-            })?;
-            let key_with_hash =
-                PrivateKeyWithHashAlg::new(Arc::new(key_pair), None).map_err(|e| {
-                    error_translate::translate(&e.to_string(), &config.host, config.port)
-                })?;
-            handle
-                .authenticate_publickey(&config.username, key_with_hash)
-                .await
-                .map_err(|e| {
-                    error_translate::translate(&e.to_string(), &config.host, config.port)
-                })?
-        }
-        _ => {
+    // 认证和 shell 初始化也有期限，防止服务器握手后不再响应。
+    let mut channel = tokio::time::timeout(Duration::from_secs(45), async {
+        // 认证
+        let auth_ok = match config.auth_type.as_str() {
+            "password" => {
+                let pwd = config.password.as_deref().unwrap_or("");
+                handle
+                    .authenticate_password(&config.username, pwd)
+                    .await
+                    .map_err(|e| {
+                        error_translate::translate(&e.to_string(), &config.host, config.port)
+                    })?
+            }
+            "key" => {
+                let key_path = config.key_path.as_deref().unwrap_or("");
+                let passphrase = config.key_passphrase.as_deref();
+                let key_pair = load_key_with_legacy_fallback(key_path, passphrase)
+                    .map_err(|e| error_translate::translate(&e, &config.host, config.port))?;
+                authenticate_private_key(&mut handle, &config.username, key_pair)
+                    .await
+                    .map_err(|e| {
+                        error_translate::translate(&e.to_string(), &config.host, config.port)
+                    })?
+            }
+            _ => {
+                return Err(error_translate::TranslatedError {
+                    code: error_translate::ErrorCode::Unknown,
+                    human_msg: "不支持的认证方式".into(),
+                    detail: format!("auth_type: {}", config.auth_type),
+                    suggestions: vec!["支持 password 或 key".into()],
+                })
+            }
+        };
+
+        if !auth_ok.success() {
+            let key_auth = config.auth_type == "key";
             return Err(error_translate::TranslatedError {
-                code: error_translate::ErrorCode::Unknown,
-                human_msg: "不支持的认证方式".into(),
-                detail: format!("auth_type: {}", config.auth_type),
-                suggestions: vec!["支持 password 或 key".into()],
-            })
+                code: if key_auth {
+                    error_translate::ErrorCode::AuthFailedKey
+                } else {
+                    error_translate::ErrorCode::AuthFailedPassword
+                },
+                human_msg: if key_auth {
+                    "密钥认证失败"
+                } else {
+                    "密码认证失败"
+                }
+                .into(),
+                detail: "服务器未接受当前用户的认证请求".into(),
+                suggestions: if key_auth {
+                    vec![
+                        "核对用户名与所选私钥文件是否和终端命令一致".into(),
+                        "检查服务器是否为该用户配置了对应公钥".into(),
+                    ]
+                } else {
+                    vec![
+                        "确认用户名和密码是否正确".into(),
+                        "检查服务器是否允许该用户使用密码登录".into(),
+                    ]
+                },
+            });
         }
-    };
 
-    if !auth_ok {
-        return Err(error_translate::TranslatedError {
-            code: error_translate::ErrorCode::AuthFailedPassword,
-            human_msg: "认证失败".into(),
-            detail: "用户名或凭据不正确".into(),
-            suggestions: vec![
-                "确认用户名和密码/密钥是否正确".into(),
-                "检查服务器是否允许该用户登录".into(),
-            ],
-        });
-    }
+        // 打开 shell channel
+        let channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
 
-    // 打开 shell channel
-    let mut channel = handle.channel_open_session().await.map_err(|e| {
-        error_translate::translate(&e.to_string(), &config.host, config.port)
-    })?;
+        channel
+            .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+            .await
+            .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
 
-    channel
-        .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
-        .await
-        .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
+        channel
+            .request_shell(false)
+            .await
+            .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
 
-    channel
-        .request_shell(false)
-        .await
-        .map_err(|e| error_translate::translate(&e.to_string(), &config.host, config.port))?;
+        Ok::<_, error_translate::TranslatedError>(channel)
+    })
+    .await
+    .map_err(|_| {
+        error_translate::translate("SSH authentication timed out", &config.host, config.port)
+    })??;
 
     // 将底层 client::Handle 放入共享 Arc<Mutex>，供 SFTP 复用同一条 SSH 连接
     let client = Arc::new(Mutex::new(handle));
@@ -447,12 +434,15 @@ pub async fn connect(
     let io_status = status.clone();
     let io_status_tx = status_tx.clone();
     let io_sid = session_id.clone();
+    let io_server_id = server_id.clone();
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let io_alive = alive.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 // 显式关闭信号
-                _ = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
                         break;
                     }
                 }
@@ -518,26 +508,37 @@ pub async fn connect(
                 }
             }
         }
-        // 会话结束（显式关闭 或 网络断开/keepalive 超时），通知前端并真正断开 SSH
+        io_alive.store(false, std::sync::atomic::Ordering::Release);
+        // 先从连接池移除再通知界面，避免快速退出的 shell 被重新标成在线。
+        if let Some(state) = io_app.try_state::<crate::AppState>() {
+            state.ssh_manager.remove_finished(&io_sid).await;
+            state
+                .sftp_manager
+                .close_for_session(&io_server_id, &io_sid)
+                .await;
+        }
         let _ = io_app.emit(
             events::CONNECTION_STATUS,
             serde_json::json!({
-                "sessionId": io_sid,
-                "status": "disconnected",
-                "message": "连接已断开"
+                "serverId": io_server_id, "sessionId": io_sid,
+                "status": "disconnected", "message": "连接已断开"
             }),
         );
-        let _ = client.lock().await.disconnect(Disconnect::ByApplication, "session ended", "en").await;
+        let _ = client
+            .lock()
+            .await
+            .disconnect(Disconnect::ByApplication, "session ended", "en")
+            .await;
     });
 
     Ok(SessionHandle {
+        alive,
         session_id,
         server_id,
         client: client_for_session,
         input_tx,
         resize_tx,
         status,
-        status_tx,
         status_rx: Some(status_rx),
         shutdown: shutdown_tx,
     })
@@ -548,9 +549,8 @@ static RE_CWD: LazyLock<regex::Regex> = LazyLock::new(|| {
     // 匹配形如：` /var/log`（末尾空格 + 斜杠路径 + 空格/行尾），也兼容 `~` 家目录显示
     regex::Regex::new(r#"(?:^|[\r\n])\s+((?:/|~)[^\s$#]*[^\s$#/]?)\s*[\r\n]?$"#).unwrap()
 });
-static RE_USERHOST: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"([\w.-]+)@([\w.-]+):").unwrap()
-});
+static RE_USERHOST: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"([\w.-]+)@([\w.-]+):").unwrap());
 
 /// 从输出中提取 cwd：匹配形如  /path/to/dir 的路径
 fn extract_cwd(text: &str) -> Option<String> {

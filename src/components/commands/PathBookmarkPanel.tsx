@@ -1,3 +1,5 @@
+import { runAction } from "@/lib/errors";
+import { quoteShellPath } from "@/lib/shell";
 import { useEffect, useState } from "react";
 import { usePathBookmarkStore } from "@/stores/usePathBookmarkStore";
 import { useTerminalStore } from "@/stores/useTerminalStore";
@@ -16,7 +18,7 @@ export function PathBookmarkPanel() {
   const [pathInput, setPathInput] = useState("");
   const [labelInput, setLabelInput] = useState("");
 
-  const activeServerId = sessions.find((s) => s.sessionId === activeSessionId)?.serverId ?? null;
+  const activeServerId = sessions.find((s) => s.sessionId === activeSessionId && s.status === "connected")?.serverId ?? null;
 
   useEffect(() => {
     if (activeServerId && activeServerId !== loadedServerId) {
@@ -29,7 +31,7 @@ export function PathBookmarkPanel() {
     if (viewMode === "files") {
       openPath(activeServerId, path);
     } else if (activeSessionId) {
-      terminalService.sendInput(activeSessionId, `cd ${path}\n`);
+      void runAction(() => terminalService.sendInput(activeSessionId, `cd -- ${quoteShellPath(path)}\n`));
     }
   };
 
@@ -52,7 +54,7 @@ export function PathBookmarkPanel() {
     "w-full px-2.5 py-1.5 rounded-md text-helper text-primary outline-none placeholder-tertiary bg-base border border-border-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all duration-150";
 
   return (
-    <div className="border-t border-border-subtle flex-shrink-0">
+    <div className="border-t border-border-subtle shrink-0">
       {/* 头部 */}
       <div className="flex items-center justify-between px-3 pt-2 pb-1">
         <span className="text-label font-medium text-tertiary uppercase tracking-wide">
@@ -77,7 +79,7 @@ export function PathBookmarkPanel() {
             placeholder="/data/app/logs（可在终端先 pwd）"
             value={pathInput}
             onChange={(e) => setPathInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+            onKeyDown={(e) => e.key === "Enter" && runAction(handleAdd)}
             autoFocus
           />
           <input
@@ -85,7 +87,7 @@ export function PathBookmarkPanel() {
             placeholder="备注名（可选，如：日志目录）"
             value={labelInput}
             onChange={(e) => setLabelInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAdd()}
+            onKeyDown={(e) => e.key === "Enter" && runAction(handleAdd)}
           />
           <div className="flex gap-1.5">
             <button
@@ -98,7 +100,7 @@ export function PathBookmarkPanel() {
               className="flex-1 py-1 rounded text-label font-medium text-white transition-colors disabled:opacity-40"
               style={{ background: pathInput.trim() ? "var(--accent)" : "var(--border-subtle)" }}
               disabled={!pathInput.trim()}
-              onClick={handleAdd}
+              onClick={() => { void runAction(handleAdd); }}
             >
               收藏
             </button>
@@ -115,7 +117,7 @@ export function PathBookmarkPanel() {
             onClick={() => handleJump(bm.path)}
             title={`cd ${bm.path}`}
           >
-            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" className="flex-shrink-0">
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none" className="shrink-0">
               <path
                 d="M1.5 4C1.5 3.17 2.17 2.5 3 2.5H6L7.5 4.5H13C13.83 4.5 14.5 5.17 14.5 6V11.5C14.5 12.33 13.83 13 13 13H3C2.17 13 1.5 12.33 1.5 11.5V4Z"
                 stroke="var(--text-tertiary)"
@@ -130,10 +132,10 @@ export function PathBookmarkPanel() {
               <div className="text-label text-disabled font-mono truncate">{bm.path}</div>
             </div>
             <button
-              className="opacity-0 group-hover:opacity-100 text-disabled hover:text-danger transition-all p-0.5 flex-shrink-0"
+              className="opacity-0 group-hover:opacity-100 text-disabled hover:text-danger transition-all p-0.5 shrink-0"
               onClick={(e) => {
                 e.stopPropagation();
-                deleteBookmark(bm.id);
+                void runAction(() => deleteBookmark(bm.id));
               }}
               title="删除"
             >

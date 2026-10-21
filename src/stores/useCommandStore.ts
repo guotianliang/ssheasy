@@ -1,3 +1,4 @@
+import { reportError } from "@/lib/errors";
 import { create } from "zustand";
 import type { CommandTemplate, CommandInput } from "@/types/command";
 import { commandService } from "@/services/commandService";
@@ -38,7 +39,7 @@ export const useCommandStore = create<CommandState>((set, get) => ({
       set({ commands, loading: false });
     } catch (e) {
       set({ loading: false });
-      console.error("Failed to fetch commands:", e);
+      reportError(e);
     }
   },
 
@@ -58,9 +59,10 @@ export const useCommandStore = create<CommandState>((set, get) => ({
   },
 
   fetchRecent: async (serverId) => {
+    set({ recentServerId: serverId, recentCommands: [] });
     try {
       const recent = await commandService.listRecent(serverId, 20);
-      set({ recentCommands: recent, recentServerId: serverId });
+      if (get().recentServerId === serverId) set({ recentCommands: recent });
     } catch {
       // 静默失败
     }

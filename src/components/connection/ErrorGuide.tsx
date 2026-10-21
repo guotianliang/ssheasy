@@ -12,7 +12,7 @@ export function ErrorGuide({ error }: { error: TranslatedError }) {
           <div className="text-label text-disabled uppercase tracking-wider">建议操作</div>
           {error.suggestions.map((s, i) => (
             <div key={i} className="flex items-start gap-1.5 text-helper text-secondary">
-              <span className="text-warning mt-0.5 flex-shrink-0">•</span>
+              <span className="text-warning mt-0.5 shrink-0">•</span>
               <span>{s}</span>
             </div>
           ))}

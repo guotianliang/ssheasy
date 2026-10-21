@@ -1,4 +1,6 @@
-import { MutableRefObject } from "react";
+import { MutableRefObject, useEffect, useState } from "react";
+import { SettingsModal } from "@/components/settings/SettingsModal";
+import { ViewSwitch } from "./ViewSwitch";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { ServerList } from "@/components/connection/ServerList";
 import { WorkspacePanel } from "@/components/layout/WorkspacePanel";
@@ -11,14 +13,19 @@ interface AppShellProps {
 }
 
 export function AppShell({ outputHandlerRef }: AppShellProps) {
+  const [showSettings, setShowSettings] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key === ",") { e.preventDefault(); setShowSettings(true); } };
+    window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const sessions = useTerminalStore((s) => s.sessions);
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-base">
       {/* 顶部标题栏 */}
-      <header className="h-9 flex items-center px-4 border-b border-border-subtle bg-surface select-none flex-shrink-0">
+      <header className="h-9 flex items-center px-4 border-b border-border-subtle bg-surface select-none shrink-0">
         <div className="flex items-center gap-2">
-          <div className="w-4 h-4 rounded bg-gradient-to-br from-accent to-accent-active flex items-center justify-center">
+          <div className="w-4 h-4 rounded bg-linear-to-br from-accent to-accent-active flex items-center justify-center">
             <svg width="9" height="9" viewBox="0 0 12 12" fill="none">
               <path d="M2 3L5 6L2 9" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               <path d="M6.5 9H10" stroke="white" strokeWidth="1.5" strokeLinecap="round" />
@@ -27,14 +34,18 @@ export function AppShell({ outputHandlerRef }: AppShellProps) {
           <span className="text-helper font-medium text-secondary">SSHEasy</span>
         </div>
         <div className="ml-auto flex items-center gap-3">
+          <ViewSwitch />
+          <button className="text-helper text-tertiary hover:text-accent" onClick={() => setShowSettings(true)} title="设置 (⌘,)">设置</button>
           {sessions.length > 0 && (
             <span className="text-label text-tertiary">
-              {sessions.length} 个活跃连接
+              {sessions.filter((s) => s.status === "connected").length} 个活跃连接
             </span>
           )}
-          <span className="text-label text-disabled">v0.1.0</span>
+          <span className="text-label text-disabled">v0.1.1</span>
         </div>
       </header>
+
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
 
       {/* 主体三栏 — 可拖拽调宽 */}
       <PanelGroup direction="horizontal" autoSaveId="ssheasy-layout" className="flex-1 min-h-0">

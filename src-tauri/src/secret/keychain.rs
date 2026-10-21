@@ -14,8 +14,7 @@ pub fn get_password(server_id: &str) -> Result<Option<String>, String> {
         Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
         Err(e) => {
             // errSecItemNotFound 表示没有存储过，不是错误
-            let msg = e.to_string();
-            if msg.contains("not be found") || msg.contains("-25300") {
+            if e.code() == -25300 {
                 Ok(None)
             } else {
                 Err(format!("Keychain 读取失败: {}", e))
@@ -26,8 +25,11 @@ pub fn get_password(server_id: &str) -> Result<Option<String>, String> {
 
 /// 从 Keychain 删除密码
 pub fn delete_password(server_id: &str) -> Result<(), String> {
-    delete_generic_password(SERVICE, server_id)
-        .map_err(|e| format!("Keychain 删除失败: {}", e))
+    match delete_generic_password(SERVICE, server_id) {
+        Ok(()) => Ok(()),
+        Err(e) if e.code() == -25300 => Ok(()),
+        Err(e) => Err(format!("Keychain 删除失败: {}", e)),
+    }
 }
 
 // ===== 私钥 passphrase（独立 account，避免与登录密码冲突）=====
@@ -47,8 +49,7 @@ pub fn get_key_passphrase(server_id: &str) -> Result<Option<String>, String> {
     match get_generic_password(SERVICE, &keypass_account(server_id)) {
         Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not be found") || msg.contains("-25300") {
+            if e.code() == -25300 {
                 Ok(None)
             } else {
                 Err(format!("Keychain 读取失败: {}", e))
@@ -62,8 +63,7 @@ pub fn delete_key_passphrase(server_id: &str) -> Result<(), String> {
     match delete_generic_password(SERVICE, &keypass_account(server_id)) {
         Ok(_) => Ok(()),
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not be found") || msg.contains("-25300") {
+            if e.code() == -25300 {
                 Ok(())
             } else {
                 Err(format!("Keychain 删除失败: {}", e))

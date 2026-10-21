@@ -1,3 +1,4 @@
+import { reportError } from "@/lib/errors";
 import { useState, useEffect } from "react";
 import { hostkeyService } from "@/services/hostkeyService";
 import type { HostKeyVerifyEvent, HostKeyDecision } from "@/types/hostkey";
@@ -16,7 +17,7 @@ export function HostKeyVerifyModal({
     try {
       await hostkeyService.decide(prompt.token, decision);
     } catch (e) {
-      console.error("host_key_decision 调用失败", e);
+      reportError(e);
     } finally {
       setBusy(false);
       onResolved();
@@ -39,7 +40,7 @@ export function HostKeyVerifyModal({
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/65 backdrop-blur-[2px] animate-fade-in"
       onClick={(e) => e.target === e.currentTarget && !busy && decide("reject")}
     >
-      <div className="w-[420px] rounded-xl p-5 shadow-2xl bg-surface border border-border-subtle animate-slide-in">
+      <div role="dialog" aria-modal="true" aria-label="确认主机指纹" className="w-[480px] rounded-xl p-5 shadow-2xl bg-surface border border-border-subtle animate-slide-in">
         <div className="flex items-center gap-2 mb-3">
           <span
             className="inline-block w-2.5 h-2.5 rounded-full"
@@ -84,7 +85,7 @@ export function HostKeyVerifyModal({
             disabled={busy}
             onClick={() => decide("accept-once")}
           >
-            仅本次连接（不再询问）
+            仅本次信任
           </button>
           <button
             className="w-full py-2 rounded-lg text-helper text-danger bg-transparent hover:bg-danger-soft transition-colors disabled:opacity-50"

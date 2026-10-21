@@ -14,7 +14,12 @@ pub struct OperationLog {
 }
 
 impl Database {
-    pub fn insert_log(&self, server_id: &str, command: &str, risk_level: &str) -> Result<(), rusqlite::Error> {
+    pub fn insert_log(
+        &self,
+        server_id: &str,
+        command: &str,
+        risk_level: &str,
+    ) -> Result<(), rusqlite::Error> {
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         self.conn.execute(
             "INSERT INTO logs (server_id, command, risk_level, executed_at) VALUES (?1, ?2, ?3, ?4)",
@@ -23,7 +28,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_logs(&self, server_id: Option<&str>, limit: i64) -> Result<Vec<OperationLog>, rusqlite::Error> {
+    pub fn list_logs(
+        &self,
+        server_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<OperationLog>, rusqlite::Error> {
         let mut results = Vec::new();
 
         match server_id {

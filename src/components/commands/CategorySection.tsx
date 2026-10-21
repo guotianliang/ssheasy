@@ -6,10 +6,11 @@ interface CategorySectionProps {
   name: string;
   commands: CommandTemplate[];
   onCommand: (cmd: CommandTemplate, mode: "insert" | "execute") => void;
+  onEdit: (command: CommandTemplate) => void;
   onDelete: (id: string) => void;
 }
 
-export function CategorySection({ name, commands, onCommand, onDelete }: CategorySectionProps) {
+export function CategorySection({ name, commands, onCommand, onDelete, onEdit }: CategorySectionProps) {
   const [open, setOpen] = useState(true);
 
   return (
@@ -34,7 +35,7 @@ export function CategorySection({ name, commands, onCommand, onDelete }: Categor
       {open && (
         <div className="ml-1 mt-0.5 space-y-0.5">
           {commands.map((cmd) => (
-            <CommandItem key={cmd.id} item={cmd} onCommand={onCommand} onDelete={onDelete} />
+            <CommandItem key={cmd.id} item={cmd} onCommand={onCommand} onDelete={onDelete} onEdit={onEdit} />
           ))}
         </div>
       )}

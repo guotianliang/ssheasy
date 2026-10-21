@@ -1,3 +1,5 @@
+import { errorMessage } from "@/lib/errors";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useState, useEffect } from "react";
 import { useServerStore } from "@/stores/useServerStore";
 import { serverService } from "@/services/serverService";
@@ -29,8 +31,8 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
     if (!name && !host) return "请填写服务器名称或主机地址";
     if (!host) return "请填写主机地址（IP 或域名）";
     if (!isValidHost(host)) return "主机地址格式不正确（应为 IPv4/IPv6 或合法域名）";
-    const port = parseInt(form.port);
-    if (isNaN(port) || port < 1 || port > 65535) return "端口号需在 1-65535 之间";
+    const port = Number(form.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return "端口号需在 1-65535 之间";
     if (form.authType === "key" && !form.keyPath.trim())
       return "使用密钥认证时必须填写私钥路径";
     return null;
@@ -49,10 +51,10 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
   });
 
   const buildInput = (): ServerInput => ({
-    name: form.name || form.host,
-    host: form.host,
-    port: parseInt(form.port) || 22,
-    username: form.username,
+    name: form.name.trim() || form.host.trim(),
+    host: form.host.trim(),
+    port: Number(form.port),
+    username: form.username.trim() || "root",
     authType: form.authType,
     keyPath: form.authType === "key" ? form.keyPath : undefined,
     groupName: form.groupName,
@@ -77,7 +79,8 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
       const result = await serverService.test(
         buildInput(),
         passwordPayload(),
-        passphrasePayload()
+        passphrasePayload(),
+        server?.id
       );
       setTestResult(result);
       if (result.success) setStep(2);
@@ -107,7 +110,8 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
       }
       onClose();
     } catch (e) {
-      console.error("Save failed:", e);
+      setFormError(errorMessage(e));
+      setStep(1);
     } finally {
       setSaving(false);
     }
@@ -122,18 +126,6 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Enter 提交（在 step 1 时触发测试连接）
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && !testing && !saving) {
-        if (step === 1 && form.host) handleTest();
-        else if (step === 2) handleSave();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [step, form, testing, saving]);
-
   const inputClass =
     "w-full px-3 py-2 rounded-lg text-helper text-primary outline-none placeholder-tertiary bg-base border border-border-subtle focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all duration-150";
   const labelClass = "text-label text-tertiary mb-1 block";
@@ -144,7 +136,7 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px] animate-fade-in"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="w-96 rounded-xl p-5 shadow-2xl bg-surface border border-border-subtle animate-slide-in">
+      <div role="dialog" aria-modal="true" aria-label={isEdit ? "编辑服务器" : "添加服务器"} className="w-96 max-h-[90vh] overflow-y-auto rounded-xl p-5 shadow-2xl bg-surface border border-border-subtle animate-slide-in">
         <h3 className="text-title font-medium text-primary mb-4">
           {step === 2 ? "连接成功" : isEdit ? "编辑服务器" : "添加服务器"}
         </h3>
@@ -229,7 +221,9 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
             ) : (
               <>
                 <div>
-                  <label className={labelClass}>私钥文件路径</label>
+                  <div className="flex justify-between"><label className={labelClass}>私钥文件路径</label><button className="text-label text-accent" onClick={async () => {
+                    try { const path = await open({ title: "选择 SSH 私钥", multiple: false }); if (typeof path === "string") setForm({ ...form, keyPath: path }); } catch (e) { setFormError(errorMessage(e)); }
+                  }}>选择文件</button></div>
                   <input
                     className={inputClass}
                     placeholder="~/.ssh/id_rsa"
@@ -281,7 +275,7 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
               </button>
               <button
                 className="flex-1 py-2 rounded-lg text-helper text-secondary bg-elevated border border-border-subtle hover:text-primary transition-colors disabled:opacity-40"
-                disabled={!form.host || saving}
+                disabled={!form.host || saving || testing}
                 onClick={handleSave}
                 title="跳过测试直接保存"
               >
@@ -289,7 +283,7 @@ export function ServerFormModal({ server, onClose }: ServerFormModalProps) {
               </button>
               <button
                 className="flex-1 py-2 rounded-lg text-helper font-medium text-white bg-accent hover:bg-accent-hover transition-colors disabled:opacity-40"
-                disabled={!form.host || testing}
+                disabled={!form.host || testing || saving}
                 onClick={handleTest}
               >
                 {testing ? "测试中..." : "测试连接"}

@@ -4,10 +4,11 @@ import type { CommandTemplate } from "@/types/command";
 interface CommandItemProps {
   item: CommandTemplate;
   onCommand: (cmd: CommandTemplate, mode: "insert" | "execute") => void;
+  onEdit: (command: CommandTemplate) => void;
   onDelete: (id: string) => void;
 }
 
-export function CommandItem({ item, onCommand, onDelete }: CommandItemProps) {
+export function CommandItem({ item, onCommand, onDelete, onEdit }: CommandItemProps) {
   const [hovered, setHovered] = useState(false);
 
   return (
@@ -28,7 +29,7 @@ export function CommandItem({ item, onCommand, onDelete }: CommandItemProps) {
 
       {/* 直接执行按钮 */}
       <button
-        className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150"
+        className="shrink-0 w-5 h-5 rounded flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150"
         style={{ background: "var(--success-soft)" }}
         onClick={(e) => {
           e.stopPropagation();
@@ -41,10 +42,12 @@ export function CommandItem({ item, onCommand, onDelete }: CommandItemProps) {
         </svg>
       </button>
 
+      {!item.isBuiltin && <button className="text-label text-tertiary opacity-0 group-hover:opacity-100 focus:opacity-100" onClick={(e) => { e.stopPropagation(); onEdit(item); }} title="编辑命令">编辑</button>}
+
       {/* 删除按钮（仅自定义命令） */}
       {!item.isBuiltin && (
         <button
-          className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150 text-disabled hover:text-danger"
+          className="shrink-0 w-5 h-5 rounded flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-150 text-disabled hover:text-danger"
           onClick={(e) => {
             e.stopPropagation();
             onDelete(item.id);

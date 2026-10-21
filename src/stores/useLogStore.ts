@@ -8,31 +8,23 @@ interface LogState {
   error: string | null;
   /** 拉取日志，serverId 为空表示全部服务器 */
   fetch: (serverId?: string) => Promise<void>;
-  /** 记录一次操作并刷新列表 */
-  record: (serverId: string, command: string) => Promise<void>;
 }
 
+let requestId = 0;
 export const useLogStore = create<LogState>((set) => ({
   logs: [],
   loading: false,
   error: null,
 
   fetch: async (serverId) => {
-    set({ loading: true, error: null });
+    const request = ++requestId;
+    set({ loading: true, error: null, logs: [] });
     try {
       const logs = await logService.list(serverId, 300);
-      set({ logs, loading: false });
+      if (request === requestId) set({ logs, loading: false });
     } catch (e) {
-      set({ loading: false, error: e instanceof Error ? e.message : String(e) });
+      if (request === requestId) set({ loading: false, error: e instanceof Error ? e.message : String(e) });
     }
   },
 
-  record: async (serverId, command) => {
-    try {
-      await logService.operation(serverId, command);
-    } catch (e) {
-      // 记录失败不应影响主流程
-      console.error("记录操作日志失败", e);
-    }
-  },
 }));

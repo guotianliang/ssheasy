@@ -1,8 +1,10 @@
+import { useServerStore } from "./useServerStore";
+import { useSftpStore } from "./useSftpStore";
 import { create } from "zustand";
 import { terminalService } from "@/services/terminalService";
 import type { SessionStatusInfo } from "@/types/terminal";
 
-export type SessionStatus = "connected" | "disconnected";
+export type SessionStatus = "connecting" | "connected" | "disconnected";
 
 interface TerminalSession {
   sessionId: string;
@@ -33,64 +35,72 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   sessionStatuses: {},
 
   connect: async (serverId, serverName) => {
-    const sessionId = await terminalService.connect(serverId);
-    const session: TerminalSession = {
-      sessionId,
-      serverId,
-      serverName,
-      status: "connected",
-    };
-    set((s) => ({
-      sessions: [...s.sessions, session],
-      activeSessionId: sessionId,
-    }));
-    return sessionId;
+    const existing = get().sessions.find((s) => s.serverId === serverId && s.status !== "disconnected");
+    if (existing) { set({ activeSessionId: existing.sessionId }); useSftpStore.getState().setViewMode("terminal"); return existing.sessionId; }
+    const sessionId = crypto.randomUUID();
+    set((s) => ({ sessions: [...s.sessions, { sessionId, serverId, serverName, status: "connecting" }], activeSessionId: sessionId }));
+    useServerStore.getState().setConnectionStatus(serverId, "connecting");
+    useSftpStore.getState().setViewMode("terminal");
+    try {
+      await terminalService.connect(serverId, sessionId);
+      set((s) => ({ sessions: s.sessions.map((t) => t.sessionId === sessionId && t.status === "connecting" ? { ...t, status: "connected" } : t) }));
+      useServerStore.getState().setConnectionStatus(serverId, get().sessions.find((s) => s.sessionId === sessionId)?.status ?? "disconnected");
+      return sessionId;
+    } catch (e) {
+      get().markDisconnected(sessionId, "连接失败，请检查连接配置后重试");
+      useServerStore.getState().setConnectionStatus(serverId, "error");
+      throw e;
+    }
   },
 
   reconnect: async (sessionId) => {
     const target = get().sessions.find((s) => s.sessionId === sessionId);
-    if (!target) return null;
-    // 先关闭旧 session（清理后端资源 + 移除 tab）
-    await get().close(sessionId);
-    // 重新连接到同一台服务器
-    try {
-      return await get().connect(target.serverId, target.serverName);
-    } catch (e) {
-      console.error("Reconnect failed:", e);
-      return null;
-    }
+    if (!target || target.status === "connecting") return null;
+    const connected = await get().connect(target.serverId, target.serverName);
+    if (connected !== sessionId && get().sessions.find((s) => s.sessionId === connected)?.status === "connected") await get().close(sessionId);
+    return connected;
   },
 
   close: async (sessionId) => {
+    const target = get().sessions.find((s) => s.sessionId === sessionId);
+    if (target?.status === "connecting") return;
     await terminalService.close(sessionId);
     set((s) => {
       const sessions = s.sessions.filter((t) => t.sessionId !== sessionId);
-      const activeSessionId =
-        s.activeSessionId === sessionId
-          ? sessions[sessions.length - 1]?.sessionId ?? null
-          : s.activeSessionId;
-      return { sessions, activeSessionId };
+      const { [sessionId]: _removed, ...sessionStatuses } = s.sessionStatuses;
+      const activeSessionId = s.activeSessionId === sessionId ? sessions[sessions.length - 1]?.sessionId ?? null : s.activeSessionId;
+      return { sessions, activeSessionId, sessionStatuses };
     });
+    if (target && !get().sessions.some((s) => s.serverId === target.serverId && s.status === "connected")) {
+      useServerStore.getState().setConnectionStatus(target.serverId, "disconnected");
+      if (useSftpStore.getState().loadedServerId === target.serverId) useSftpStore.getState().reset();
+    }
   },
 
   setActiveSession: (sessionId) => set({ activeSessionId: sessionId }),
 
-  markDisconnected: (sessionId, reason) =>
+  markDisconnected: (sessionId, reason) => {
+    const target = get().sessions.find((s) => s.sessionId === sessionId);
     set((s) => ({
       sessions: s.sessions.map((t) =>
         t.sessionId === sessionId
           ? { ...t, status: "disconnected", disconnectReason: reason }
           : t
       ),
-    })),
+    }));
+    if (target && !get().sessions.some((s) => s.serverId === target.serverId && s.status === "connected")) {
+      useServerStore.getState().setConnectionStatus(target.serverId, "disconnected");
+      if (useSftpStore.getState().loadedServerId === target.serverId) useSftpStore.getState().reset();
+    }
+  },
 
   updateStatus: (sessionId, info) =>
-    set((s) => ({
+    set((s) => s.sessions.some((t) => t.sessionId === sessionId) ? ({
       sessionStatuses: {
         ...s.sessionStatuses,
         [sessionId]: info,
       },
-    })),
+    }) : s),
 
   refreshStatus: async (sessionId) => {
     try {

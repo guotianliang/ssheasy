@@ -32,10 +32,10 @@ export default {
         "info-soft": "var(--info-soft)",
       },
       fontSize: {
-        label: ["10px", "1.3"],
-        helper: ["11px", "1.4"],
-        body: ["13px", "1.5"],
-        title: ["14px", "1.4"],
+        label: ["12px", "1.4"],
+        helper: ["13px", "1.5"],
+        body: ["14px", "1.5"],
+        title: ["16px", "1.5"],
       },
       fontFamily: {
         mono: ["'JetBrains Mono'", "'SF Mono'", "'Fira Code'", "monospace"],

@@ -9,7 +9,8 @@ pub async fn path_bookmark_list(
     server_id: String,
 ) -> Result<Vec<PathBookmark>, String> {
     let db = state.db.lock().await;
-    db.list_path_bookmarks(&server_id).map_err(|e| e.to_string())
+    db.list_path_bookmarks(&server_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

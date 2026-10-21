@@ -50,16 +50,16 @@ export function isValidHost(host: string): boolean {
     });
   }
   if (h.includes(":")) {
-    // 简单判断 IPv6：含冒号且每段为 1-4 位十六进制
-    return h.split(":").every((p) => p === "" || /^[0-9a-fA-F]{1,4}$/.test(p));
+    try { new URL(`http://[${h}]/`); return true; } catch { return false; }
   }
+  if (h.length > 253 || /^[\d.]+$/.test(h)) return false;
   // 域名：以 . 分隔的标签，每段仅含字母/数字/连字符，不以连字符开头或结尾
   const labels = h.split(".");
   return (
     labels.length > 0 &&
     labels.every(
       (label) =>
-        label.length > 0 &&
+        label.length > 0 && label.length <= 63 &&
         !label.startsWith("-") &&
         !label.endsWith("-") &&
         [...label].every((c) => /[a-zA-Z0-9-]/.test(c))

@@ -1,9 +1,9 @@
-import { useEffect } from "react";
+import { reportError } from "@/lib/errors";
+import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { EVENTS } from "@/types/events";
 import type { TerminalOutputEvent, ConnectionStatusEvent, SessionStatusEvent } from "@/types/terminal";
 import type { HostKeyVerifyEvent } from "@/types/hostkey";
-import { useServerStore } from "@/stores/useServerStore";
 import { useTerminalStore } from "@/stores/useTerminalStore";
 
 /**
@@ -14,9 +14,10 @@ export function useSSHEvents(
   onTerminalOutput: (event: TerminalOutputEvent) => void,
   onHostKeyVerify?: (event: HostKeyVerifyEvent) => void
 ) {
-  const setConnectionStatus = useServerStore((s) => s.setConnectionStatus);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
+    let disposed = false;
     const unlisteners: Promise<() => void>[] = [];
 
     // 终端输出
@@ -29,10 +30,7 @@ export function useSSHEvents(
     // 连接状态变化
     unlisteners.push(
       listen<ConnectionStatusEvent>(EVENTS.CONNECTION_STATUS, (event) => {
-        const { serverId, sessionId, status, message } = event.payload;
-        if (serverId) {
-          setConnectionStatus(serverId, status);
-        }
+        const { sessionId, status, message } = event.payload;
         // 同步更新对应 tab 的状态（断线时显示重连入口）
         if (sessionId && status === "disconnected") {
           useTerminalStore.getState().markDisconnected(sessionId, message);
@@ -56,8 +54,12 @@ export function useSSHEvents(
       })
     );
 
+    Promise.all(unlisteners).then(() => { if (!disposed) setReady(true); }).catch(reportError);
+
     return () => {
-      unlisteners.forEach((p) => p.then((unlisten) => unlisten()));
+      disposed = true;
+      unlisteners.forEach((p) => p.then((unlisten) => unlisten()).catch(reportError));
     };
-  }, [onTerminalOutput, onHostKeyVerify, setConnectionStatus]);
+  }, [onTerminalOutput, onHostKeyVerify]);
+  return ready;
 }

@@ -55,7 +55,12 @@ pub fn validate_server_input(input: &ServerInput) -> Result<(), String> {
         return Err("认证方式仅支持 password 或 key".into());
     }
 
-    if input.auth_type == "key" && input.key_path.as_deref().map_or(true, |p| p.trim().is_empty()) {
+    if input.auth_type == "key"
+        && input
+            .key_path
+            .as_deref()
+            .is_none_or(|p| p.trim().is_empty())
+    {
         return Err("使用密钥认证时必须填写私钥路径".into());
     }
 
@@ -74,13 +79,15 @@ fn is_valid_host(host: &str) -> bool {
     if host.parse::<std::net::Ipv6Addr>().is_ok() {
         return true;
     }
+    if host.len() > 253 || host.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return false;
+    }
     // 域名：以 . 分隔的标签，每段仅含字母/数字/连字符，不以连字符开头或结尾
     let mut had_label = false;
     for label in host.split('.') {
-        if label.is_empty()
-            || !label
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        if label.len() > 63
+            || label.is_empty()
+            || !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
             || label.starts_with('-')
             || label.ends_with('-')
         {
@@ -129,13 +136,13 @@ impl Database {
             "INSERT INTO servers (id, name, host, port, username, auth_type, key_path, group_name, color, sort_order, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10, ?10)",
             params![
                 id,
-                input.name,
-                input.host,
+                input.name.trim(),
+                input.host.trim(),
                 input.port.unwrap_or(22),
-                input.username.as_deref().unwrap_or("root"),
+                input.username.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("root"),
                 input.auth_type,
                 input.key_path,
-                input.group_name.as_deref().unwrap_or("默认分组"),
+                input.group_name.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("默认分组"),
                 input.color,
                 now,
             ],
@@ -179,13 +186,13 @@ impl Database {
             "UPDATE servers SET name=?2, host=?3, port=?4, username=?5, auth_type=?6, key_path=?7, group_name=?8, color=?9, updated_at=?10 WHERE id=?1",
             params![
                 id,
-                input.name,
-                input.host,
+                input.name.trim(),
+                input.host.trim(),
                 input.port.unwrap_or(22),
-                input.username.as_deref().unwrap_or("root"),
+                input.username.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("root"),
                 input.auth_type,
                 input.key_path,
-                input.group_name.as_deref().unwrap_or("默认分组"),
+                input.group_name.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("默认分组"),
                 input.color,
                 now,
             ],
@@ -194,7 +201,8 @@ impl Database {
     }
 
     pub fn delete_server(&self, id: &str) -> Result<(), rusqlite::Error> {
-        self.conn.execute("DELETE FROM servers WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM servers WHERE id = ?1", params![id])?;
         Ok(())
     }
 }

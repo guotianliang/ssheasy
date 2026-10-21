@@ -1,3 +1,4 @@
+import { reportError } from "@/lib/errors";
 import { create } from "zustand";
 import type { PathBookmark, PathBookmarkInput } from "@/types/pathBookmark";
 import { pathBookmarkService } from "@/services/pathBookmarkService";
@@ -15,19 +16,19 @@ interface PathBookmarkState {
   reset: () => void;
 }
 
-export const usePathBookmarkStore = create<PathBookmarkState>((set) => ({
+export const usePathBookmarkStore = create<PathBookmarkState>((set, get) => ({
   bookmarks: [],
   loadedServerId: null,
   loading: false,
 
   fetchBookmarks: async (serverId) => {
-    set({ loading: true });
+    set({ loading: true, loadedServerId: serverId, bookmarks: [] });
     try {
       const bookmarks = await pathBookmarkService.list(serverId);
-      set({ bookmarks, loadedServerId: serverId, loading: false });
+      if (get().loadedServerId === serverId) set({ bookmarks, loading: false });
     } catch (e) {
       set({ loading: false });
-      console.error("Failed to fetch path bookmarks:", e);
+      reportError(e);
     }
   },
 

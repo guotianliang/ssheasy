@@ -47,3 +47,11 @@ id_ed25519
 # Test artifacts
 coverage/
 .nyc_output/
+
+.venv/
+__pycache__/
+artifacts/
+playwright-report/
+test-results/
+*.db-shm
+*.db-wal

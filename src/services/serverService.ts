@@ -12,6 +12,6 @@ export const serverService = {
 
   delete: (id: string) => invoke<void>("server_delete", { id }),
 
-  test: (input: ServerInput, password?: string, keyPassphrase?: string) =>
-    invoke<TestResult>("server_test", { input, password, keyPassphrase }),
+  test: (input: ServerInput, password?: string, keyPassphrase?: string, serverId?: string) =>
+    invoke<TestResult>("server_test", { input, password, keyPassphrase, serverId }),
 };

@@ -5,7 +5,7 @@ use crate::storage::recent_command_repo::RecentCommand;
 use crate::AppState;
 
 /// 简单的命令风险评级：高危 / 中危 / 低危
-fn assess_risk(cmd: &str) -> &'static str {
+pub fn assess_risk(cmd: &str) -> &'static str {
     let c = cmd.to_lowercase();
     const HIGH: &[&str] = &[
         "rm -rf",
@@ -91,4 +91,22 @@ pub async fn list_logs(
     let limit = limit.unwrap_or(200).clamp(1, 1000);
     db.list_logs(server_id.as_deref(), limit)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn logs_export(
+    state: State<'_, AppState>,
+    server_id: Option<String>,
+    dest_path: String,
+) -> Result<(), String> {
+    let rows = state
+        .db
+        .lock()
+        .await
+        .list_logs(server_id.as_deref(), i64::MAX)
+        .map_err(|e| e.to_string())?;
+    let content = serde_json::to_vec_pretty(&rows).map_err(|e| e.to_string())?;
+    tokio::fs::write(dest_path, content)
+        .await
+        .map_err(|e| format!("导出失败: {e}"))
 }

@@ -21,26 +21,26 @@ impl Database {
         )?;
         let current: i64 = self
             .conn
-            .query_row(
-                "SELECT MAX(version) FROM schema_version",
-                [],
-                |row| row.get::<usize, i64>(0),
-            )
+            .query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+                row.get::<usize, i64>(0)
+            })
             .unwrap_or(0);
 
         const MIGRATIONS: &[&str] = &[
             include_str!("../../migrations/001_init.sql"),
             include_str!("../../migrations/002_path_bookmarks.sql"),
             include_str!("../../migrations/003_recent_commands.sql"),
+            include_str!("../../migrations/004_settings.sql"),
+            include_str!("../../migrations/005_builtin_path.sql"),
         ];
 
         for (i, sql) in MIGRATIONS.iter().enumerate() {
             let target = (i + 1) as i64;
             if current < target {
-                self.conn.execute_batch(sql)?;
-                self.conn.execute_batch(&format!(
-                    "INSERT INTO schema_version (version) VALUES ({target})"
-                ))?;
+                let tx = self.conn.unchecked_transaction()?;
+                tx.execute_batch(sql)?;
+                tx.execute("INSERT INTO schema_version (version) VALUES (?1)", [target])?;
+                tx.commit()?;
             }
         }
         Ok(())

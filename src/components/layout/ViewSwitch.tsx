@@ -15,7 +15,8 @@ export function ViewSwitch() {
             : "text-tertiary hover:text-secondary"
         }`}
         onClick={() => setViewMode(mode)}
-        title={mode === "terminal" ? "切换到终端" : "切换到文件浏览"}
+        aria-pressed={active}
+        title={`切换到${label}`}
       >
         {icon}
         {label}

@@ -17,6 +17,7 @@ export function FilePreview() {
     const content = previewContent.toLowerCase();
     let idx = content.indexOf(query);
     while (idx !== -1) {
+      if (indices.length >= 10000) break;
       indices.push(idx);
       idx = content.indexOf(query, idx + query.length);
     }
@@ -26,17 +27,17 @@ export function FilePreview() {
   // 重置匹配索引
   useEffect(() => {
     setCurrentMatchIdx(0);
-  }, [searchQuery]);
+  }, [searchQuery, previewFile?.path]);
 
   // 滚动到当前匹配
   useEffect(() => {
     if (highlightRef.current) {
       highlightRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
     }
-  }, [currentMatchIdx]);
+  }, [currentMatchIdx, searchQuery]);
 
   const handleSearchKey = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && matches.length > 0) {
       e.preventDefault();
       if (e.shiftKey) {
         setCurrentMatchIdx((i) => (i - 1 + matches.length) % matches.length);
@@ -96,7 +97,7 @@ export function FilePreview() {
   return (
     <div className="absolute inset-0 z-30 flex flex-col bg-base">
       {/* 顶部栏 */}
-      <div className="h-10 flex items-center gap-3 px-3 border-b border-border-subtle bg-surface flex-shrink-0">
+      <div className="h-10 flex items-center gap-3 px-3 border-b border-border-subtle bg-surface shrink-0">
         <button
           onClick={closePreview}
           className="flex items-center gap-1 text-secondary hover:text-primary transition-colors text-body"
@@ -108,7 +109,7 @@ export function FilePreview() {
         </button>
         <div className="w-px h-4 bg-border-subtle" />
         <span className="text-body text-primary font-medium truncate">{previewFile.name}</span>
-        <span className="text-label text-tertiary flex-shrink-0">
+        <span className="text-label text-tertiary shrink-0">
           {(previewFile.size / 1024).toFixed(1)} KB
         </span>
         <div className="ml-auto flex items-center gap-2">
@@ -125,8 +126,8 @@ export function FilePreview() {
       </div>
 
       {/* 搜索栏 */}
-      <div className="h-9 flex items-center gap-2 px-3 border-b border-border-subtle bg-surface flex-shrink-0">
-        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" className="text-tertiary flex-shrink-0">
+      <div className="h-9 flex items-center gap-2 px-3 border-b border-border-subtle bg-surface shrink-0">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" className="text-tertiary shrink-0">
           <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" />
           <path d="M10.5 10.5L13 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
         </svg>
@@ -141,7 +142,7 @@ export function FilePreview() {
         />
         {searchQuery.trim() && (
           <>
-            <span className="text-label text-tertiary flex-shrink-0">
+            <span className="text-label text-tertiary shrink-0">
               {matches.length > 0 ? `${currentMatchIdx + 1}/${matches.length}` : "无匹配"}
             </span>
             <button
@@ -185,9 +186,9 @@ export function FilePreview() {
           <pre
             ref={contentRef}
             className="text-body text-primary font-mono leading-relaxed p-4 whitespace-pre-wrap break-all"
-            style={{ fontSize: "13px", fontFamily: "'JetBrains Mono', 'SF Mono', 'Menlo', monospace" }}
+            style={{ fontSize: "14px", fontFamily: "'JetBrains Mono', 'SF Mono', 'Menlo', monospace" }}
           >
-            {renderContent()}
+            {previewContent ? renderContent() : "（空文件）"}
           </pre>
         )}
       </div>

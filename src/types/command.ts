@@ -24,7 +24,7 @@ export interface TemplateVariable {
 export function parseTemplateVars(cmd: string): string[] {
   const matches = cmd.match(/\{\{(.+?)\}\}/g);
   if (!matches) return [];
-  return matches.map((m) => m.replace(/\{\{|\}\}/g, ""));
+  return [...new Set(matches.map((m) => m.slice(2, -2)))];
 }
 
 /** 将变量值填入模板 */

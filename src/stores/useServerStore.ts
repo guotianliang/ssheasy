@@ -1,3 +1,5 @@
+import { reportError } from "@/lib/errors";
+import { useTerminalStore } from "./useTerminalStore";
 import { create } from "zustand";
 import type { Server, ServerInput, ConnectionStatus } from "@/types/server";
 import { serverService } from "@/services/serverService";
@@ -29,7 +31,7 @@ export const useServerStore = create<ServerState>((set, get) => ({
       set({ servers, loading: false });
     } catch (e) {
       set({ loading: false });
-      console.error("Failed to fetch servers:", e);
+      reportError(e);
     }
   },
 
@@ -46,6 +48,11 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   deleteServer: async (id) => {
     await serverService.delete(id);
+    const terminal = useTerminalStore.getState();
+    useTerminalStore.setState({
+      sessions: terminal.sessions.filter((s) => s.serverId !== id),
+      activeSessionId: terminal.sessions.find((s) => s.sessionId === terminal.activeSessionId)?.serverId === id ? null : terminal.activeSessionId,
+    });
     set((s) => ({
       servers: s.servers.filter((srv) => srv.id !== id),
       activeServerId: s.activeServerId === id ? null : s.activeServerId,

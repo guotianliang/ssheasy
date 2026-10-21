@@ -1,3 +1,4 @@
+import { runAction, errorMessage } from "@/lib/errors";
 import { useState, useEffect } from "react";
 import { useServerStore } from "@/stores/useServerStore";
 import { useTerminalStore } from "@/stores/useTerminalStore";
@@ -18,27 +19,26 @@ export function ServerList() {
   const [editingServer, setEditingServer] = useState<Server | null>(null);
   const [deletingServer, setDeletingServer] = useState<Server | null>(null);
   const [connecting, setConnecting] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ serverId: string; message: string } | null>(null);
   const [search, setSearch] = useState("");
 
   const handleConnect = async (serverId: string, serverName: string) => {
+    if (connectionStatus[serverId] === "connecting") return;
     setConnecting(serverId);
     setError(null);
-    useServerStore.getState().setConnectionStatus(serverId, "connecting");
     try {
       await connect(serverId, serverName);
-      useServerStore.getState().setConnectionStatus(serverId, "connected");
-    } catch (e: any) {
-      useServerStore.getState().setConnectionStatus(serverId, "error");
-      const msg = e?.error?.humanMsg || e?.message || "连接失败";
-      setError(msg);
-      setTimeout(() => {
-        useServerStore.getState().setConnectionStatus(serverId, "disconnected");
-      }, 5000);
+    } catch (e) {
+      const msg = errorMessage(e);
+      setError({ serverId, message: msg });
     } finally {
       setConnecting(null);
     }
   };
+
+  useEffect(() => {
+    if (error && connectionStatus[error.serverId] === "connected") setError(null);
+  }, [connectionStatus, error]);
 
   // 搜索过滤
   const filtered = search
@@ -77,7 +77,7 @@ export function ServerList() {
   return (
     <div className="flex flex-col h-full">
       {/* 头部 */}
-      <div className="flex items-center justify-between px-3 h-10 border-b border-border-subtle flex-shrink-0">
+      <div className="flex items-center justify-between px-3 h-10 border-b border-border-subtle shrink-0">
         <span className="text-helper font-medium text-secondary uppercase tracking-wide">服务器</span>
         <button
           className="w-5 h-5 rounded flex items-center justify-center text-tertiary hover:text-accent hover:bg-accent-soft transition-all duration-150"
@@ -92,7 +92,7 @@ export function ServerList() {
 
       {/* 搜索框 */}
       {servers.length > 0 && (
-        <div className="px-2.5 py-2 flex-shrink-0">
+        <div className="px-2.5 py-2 shrink-0">
           <div className="relative">
             <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-tertiary" width="11" height="11" viewBox="0 0 12 12" fill="none">
               <circle cx="5" cy="5" r="3.5" stroke="currentColor" strokeWidth="1.2" />
@@ -111,7 +111,7 @@ export function ServerList() {
       {/* 错误提示 */}
       {error && (
         <div className="mx-2 mt-2 px-2.5 py-2 rounded-md bg-danger-soft border border-danger/20 animate-fade-in">
-          <div className="text-label text-danger">{error}</div>
+          <div className="text-label text-danger">{error.message}</div>
         </div>
       )}
 
@@ -128,10 +128,19 @@ export function ServerList() {
                 return (
                   <div
                     key={server.id}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`连接 ${server.name}`}
                     className="group flex items-center gap-2.5 px-2 py-2 rounded-md cursor-pointer hover:bg-elevated active:bg-elevated transition-all duration-100"
                     onClick={() => handleConnect(server.id, server.name)}
+                    onKeyDown={(event) => {
+                      if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+                        event.preventDefault();
+                        void handleConnect(server.id, server.name);
+                      }
+                    }}
                   >
-                    <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${STATUS_DOT[status]}`} />
+                    <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${STATUS_DOT[status]}`} />
                     <div className="flex-1 min-w-0">
                       <div className="text-helper text-primary truncate leading-tight">{server.name}</div>
                       <div className="text-label text-tertiary truncate font-mono mt-0.5">
@@ -202,7 +211,7 @@ export function ServerList() {
       </div>
 
       {/* 底部状态 */}
-      <div className="px-3 py-2 border-t border-border-subtle flex-shrink-0">
+      <div className="px-3 py-2 border-t border-border-subtle shrink-0">
         <div className="text-label text-disabled">
           {servers.length} 台服务器 · {Object.values(connectionStatus).filter(s => s === "connected").length} 台在线
         </div>
@@ -223,7 +232,7 @@ export function ServerList() {
           <div className="w-80 rounded-xl p-5 shadow-2xl bg-surface border border-border-subtle animate-slide-in">
             <h3 className="text-title font-medium text-primary mb-2">删除服务器</h3>
             <p className="text-helper text-secondary mb-1">
-              确定要删除 <span className="text-primary">{deletingServer.name}</span> 吗？
+              删除会关闭该服务器的连接。确定删除 <span className="text-primary">{deletingServer.name}</span> 吗？
             </p>
             <p className="text-label text-tertiary font-mono mb-4">
               {deletingServer.username}@{deletingServer.host}:{deletingServer.port}
@@ -238,8 +247,10 @@ export function ServerList() {
               <button
                 className="flex-1 py-2 rounded-lg text-helper font-medium text-white bg-danger hover:bg-danger/90 transition-colors"
                 onClick={async () => {
-                  await deleteServer(deletingServer.id);
-                  setDeletingServer(null);
+                  await runAction(async () => {
+                    await deleteServer(deletingServer.id);
+                    setDeletingServer(null);
+                  });
                 }}
               >
                 删除

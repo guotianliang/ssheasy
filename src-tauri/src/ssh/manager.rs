@@ -1,6 +1,6 @@
+use russh::client;
 use std::collections::HashMap;
 use std::sync::Arc;
-use russh::client;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, Mutex};
 
@@ -27,10 +27,11 @@ impl ConnectionManager {
     /// SSH 握手全程不持有 sessions 锁；仅在建连成功后短暂加锁注册。
     pub async fn create_session(
         &self,
+        session_id: &str,
         server_id: &str,
         config: &ConnectConfig,
     ) -> Result<String, super::error_translate::TranslatedError> {
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = session_id.to_owned();
 
         // 创建输出通道：session task 通过此通道推送终端输出（原始字节）
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -42,7 +43,6 @@ impl ConnectionManager {
             server_id.to_string(),
             config,
             output_tx,
-            true,
         )
         .await?;
 
@@ -80,7 +80,15 @@ impl ConnectionManager {
         });
 
         // ── 建连成功，短暂加锁注册 ──
-        self.sessions.lock().await.insert(session_id.clone(), handle);
+        let mut sessions = self.sessions.lock().await;
+        if !handle.alive.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(super::error_translate::translate(
+                "服务器在建立 shell 后立即断开了连接",
+                &config.host,
+                config.port,
+            ));
+        }
+        sessions.insert(session_id.clone(), handle);
 
         // 通知前端连接成功
         let _ = self.app_handle.emit(
@@ -92,6 +100,7 @@ impl ConnectionManager {
             }),
         );
 
+        drop(sessions);
         Ok(session_id)
     }
 
@@ -148,6 +157,24 @@ impl ConnectionManager {
         }
     }
 
+    pub async fn remove_finished(&self, session_id: &str) {
+        self.sessions.lock().await.remove(session_id);
+    }
+
+    pub async fn close_server(&self, server_id: &str) {
+        let ids: Vec<String> = self
+            .sessions
+            .lock()
+            .await
+            .values()
+            .filter(|s| s.server_id == server_id)
+            .map(|s| s.session_id.clone())
+            .collect();
+        for id in ids {
+            self.close_session(&id).await;
+        }
+    }
+
     /// 获取会话所属的 server_id（用于联动清理 SFTP 会话）
     pub async fn session_server_id(&self, session_id: &str) -> Option<String> {
         self.sessions
@@ -158,15 +185,23 @@ impl ConnectionManager {
     }
 
     /// 返回某服务器当前终端会话底层 client::Handle（供 SFTP 复用同一条 SSH 连接）。
-    /// 若没有已建立的终端会话则返回 None，SFTP 应回退到独立连接。
+    /// 若没有活跃终端会话则返回 None。
     pub async fn client_by_server(
         &self,
         server_id: &str,
-    ) -> Option<Arc<tokio::sync::Mutex<client::Handle<ClientHandler>>>> {
+    ) -> Option<(
+        String,
+        Arc<tokio::sync::Mutex<client::Handle<ClientHandler>>>,
+    )> {
         let sessions = self.sessions.lock().await;
         sessions
             .values()
-            .find(|s| s.server_id == server_id)
-            .map(|s| s.client.clone())
+            .filter(|s| {
+                s.server_id == server_id
+                    && s.alive.load(std::sync::atomic::Ordering::Acquire)
+                    && !s.input_tx.is_closed()
+            })
+            .map(|s| (s.session_id.clone(), s.client.clone()))
+            .next()
     }
 }

@@ -1,13 +1,12 @@
 use std::collections::HashMap;
+use std::path::Path as StdPath;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
-use std::path::Path as StdPath;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::fs::File as LocalFile;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use russh::client;
-use russh::keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
 use serde_json::json;
@@ -15,8 +14,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::events;
 
+use super::session::ClientHandler;
 use crate::ssh::manager::ConnectionManager;
-use super::session::{legacy_preferred, load_key_with_legacy_fallback, ClientHandler, ConnectConfig};
 
 /// 文件条目（返回给前端）
 #[derive(Debug, Clone, Serialize)]
@@ -34,59 +33,48 @@ pub struct FileEntry {
 /// SFTP 连接池：按 server_id 缓存会话，懒加载
 /// sessions 使用内部 Mutex：建连在锁外进行，避免一个文件操作阻塞其他操作
 pub struct SftpManager {
-    app: AppHandle,
-    /// 终端连接管理器：用于复用已建立的 SSH 连接（同一条，避免重复握手/认证）
-    ssh_manager: Arc<tokio::sync::Mutex<ConnectionManager>>,
-    sessions: tokio::sync::Mutex<HashMap<String, Arc<SftpSession>>>,
+    ssh_manager: Arc<ConnectionManager>,
+    sessions: tokio::sync::Mutex<HashMap<String, (String, Arc<SftpSession>)>>,
+    gates: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl SftpManager {
-    pub fn new(app: AppHandle, ssh_manager: Arc<tokio::sync::Mutex<ConnectionManager>>) -> Self {
+    pub fn new(_app: AppHandle, ssh_manager: Arc<ConnectionManager>) -> Self {
         Self {
-            app,
             ssh_manager,
-            sessions: tokio::sync::Mutex::new(HashMap::new()),
+            sessions: Default::default(),
+            gates: Default::default(),
         }
     }
 
-    /// 获取（或建立）某服务器的 SFTP 会话
-    pub async fn session(
-        &self,
-        server_id: &str,
-        config: &ConnectConfig,
-    ) -> Result<Arc<SftpSession>, String> {
-        // 先查缓存（短锁）
-        if let Some(existing) = self.sessions.lock().await.get(server_id) {
-            return Ok(existing.clone());
-        }
-
-        // 优先复用终端已建立的 SSH 连接（同一条，省一次握手/认证/端口占用）
-        if let Some(client) = self.ssh_manager.lock().await.client_by_server(server_id).await {
-            if let Ok(sftp) = Self::open_on_client(client).await {
-                let arc = Arc::new(sftp);
-                self.sessions
-                    .lock()
-                    .await
-                    .insert(server_id.to_string(), arc.clone());
-                return Ok(arc);
-            } else {
-                log::warn!("复用终端连接建立 SFTP 失败，回退到独立连接");
+    pub async fn session(&self, server_id: &str) -> Result<Arc<SftpSession>, String> {
+        let gate = self
+            .gates
+            .lock()
+            .await
+            .entry(server_id.to_owned())
+            .or_default()
+            .clone();
+        let _guard = gate.lock().await;
+        let (session_id, client) = self
+            .ssh_manager
+            .client_by_server(server_id)
+            .await
+            .ok_or("请先连接该服务器的终端，再使用文件管理")?;
+        if let Some((id, sftp)) = self.sessions.lock().await.get(server_id) {
+            if id == &session_id {
+                return Ok(sftp.clone());
             }
         }
-
-        // 回退：建立一条独立的 SSH 连接并打开 sftp 子系统
-        let sftp = Self::connect(self.app.clone(), config).await?;
-        let arc = Arc::new(sftp);
-
-        // 注册（短锁；重复连接时后到者覆盖，先到者的连接会因 Arc drop 自动关闭）
+        self.close(server_id).await;
+        let sftp = Arc::new(Self::open_on_client(client).await?);
         self.sessions
             .lock()
             .await
-            .insert(server_id.to_string(), arc.clone());
-        Ok(arc)
+            .insert(server_id.to_owned(), (session_id, sftp.clone()));
+        Ok(sftp)
     }
 
-    /// 在已有的 client::Handle 上开一条 SFTP 子系统通道（复用终端连接）
     async fn open_on_client(
         client: Arc<tokio::sync::Mutex<client::Handle<ClientHandler>>>,
     ) -> Result<SftpSession, String> {
@@ -94,81 +82,38 @@ impl SftpManager {
         let channel = g
             .channel_open_session()
             .await
-            .map_err(|e| format!("打开会话通道失败: {}", e))?;
+            .map_err(|e| format!("打开会话通道失败: {e}"))?;
         channel
             .request_subsystem(true, "sftp")
             .await
-            .map_err(|e| format!("请求 sftp 子系统失败（服务器可能未启用 SFTP）: {}", e))?;
-
+            .map_err(|e| format!("服务器无法启动 SFTP: {e}"))?;
         SftpSession::new(channel.into_stream())
             .await
-            .map_err(|e| format!("初始化 SFTP 会话失败: {}", e))
+            .map_err(|e| format!("初始化 SFTP 失败: {e}"))
     }
 
-    /// 关闭并移除某服务器的 SFTP 会话
-    pub async fn close(&self, server_id: &str) {
-        if let Some(sftp) = self.sessions.lock().await.remove(server_id) {
+    pub async fn close_for_session(&self, server_id: &str, session_id: &str) {
+        let removed = {
+            let mut sessions = self.sessions.lock().await;
+            if sessions
+                .get(server_id)
+                .is_some_and(|(id, _)| id == session_id)
+            {
+                sessions.remove(server_id)
+            } else {
+                None
+            }
+        };
+        if let Some((_, sftp)) = removed {
             let _ = sftp.close().await;
         }
     }
 
-    /// 建立一条独立的 SSH 连接并打开 sftp 子系统
-    async fn connect(app: AppHandle, config: &ConnectConfig) -> Result<SftpSession, String> {
-        let ssh_config = Arc::new(client::Config {
-            inactivity_timeout: Some(Duration::from_secs(120)),
-            preferred: legacy_preferred(),
-            ..<_>::default()
-        });
-
-        let addr = format!("{}:{}", config.host, config.port);
-        let mut handle = client::connect(
-            ssh_config,
-            &addr,
-            ClientHandler::new(app, config.host.clone(), config.port, true),
-        )
-        .await
-        .map_err(|e| format!("连接失败: {}", e))?;
-
-        // 认证（与 shell 连接逻辑一致）
-        let auth_ok = match config.auth_type.as_str() {
-            "password" => {
-                let pwd = config.password.as_deref().unwrap_or("");
-                handle
-                    .authenticate_password(&config.username, pwd)
-                    .await
-                    .map_err(|e| format!("认证失败: {}", e))?
-            }
-            "key" => {
-                let key_path = config.key_path.as_deref().unwrap_or("");
-                let key_pair =
-                    load_key_with_legacy_fallback(key_path, config.key_passphrase.as_deref())?;
-                let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), None)
-                    .map_err(|e| format!("密钥处理失败: {}", e))?;
-                handle
-                    .authenticate_publickey(&config.username, key_with_hash)
-                    .await
-                    .map_err(|e| format!("认证失败: {}", e))?
-            }
-            _ => return Err("不支持的认证方式".into()),
-        };
-
-        if !auth_ok {
-            return Err("认证失败：用户名或凭据不正确".into());
+    pub async fn close(&self, server_id: &str) {
+        let removed = self.sessions.lock().await.remove(server_id);
+        if let Some((_, sftp)) = removed {
+            let _ = sftp.close().await;
         }
-
-        // 打开 sftp 子系统 channel
-        let channel = handle
-            .channel_open_session()
-            .await
-            .map_err(|e| format!("打开会话通道失败: {}", e))?;
-        channel
-            .request_subsystem(true, "sftp")
-            .await
-            .map_err(|e| format!("请求 sftp 子系统失败（服务器可能未启用 SFTP）: {}", e))?;
-
-        SftpSession::new(channel.into_stream())
-            .await
-            .map_err(|e| format!("初始化 SFTP 会话失败: {}", e))
     }
 }
 
@@ -180,6 +125,7 @@ pub async fn list_dir(sftp: &SftpSession, path: &str) -> Result<Vec<FileEntry>, 
         .map_err(|e| format!("读取目录失败: {}", e))?;
 
     let mut entries: Vec<FileEntry> = read_dir
+        .filter(|entry| !matches!(entry.file_name().as_str(), "." | ".."))
         .map(|entry| {
             let meta = entry.metadata();
             let file_type = meta.file_type();
@@ -224,21 +170,29 @@ pub async fn read_text_file(sftp: &SftpSession, path: &str) -> Result<FileConten
         return Err("这是目录，不是文件".into());
     }
     if size > 10 * 1024 * 1024 {
-        return Err(format!("文件 {} MB 过大，请下载到本地查看", size / 1024 / 1024));
+        return Err(format!(
+            "文件 {} MB 过大，请下载到本地查看",
+            size / 1024 / 1024
+        ));
     }
 
     // 读取文件内容
-    let mut file = sftp
+    let file = sftp
         .open(path)
         .await
         .map_err(|e| format!("打开文件失败: {}", e))?;
 
     let mut buf = Vec::with_capacity(size as usize);
-    file.read_to_end(&mut buf)
+    file.take(10 * 1024 * 1024 + 1)
+        .read_to_end(&mut buf)
         .await
         .map_err(|e| format!("读取文件失败: {}", e))?;
 
-    let content = String::from_utf8_lossy(&buf).into_owned();
+    if buf.len() > 10 * 1024 * 1024 {
+        return Err("文件过大，请下载后查看".into());
+    }
+    let content =
+        String::from_utf8(buf).map_err(|_| "文件不是 UTF-8 文本，请下载后查看".to_string())?;
     Ok(FileContent {
         content,
         size,
@@ -264,18 +218,53 @@ pub fn is_previewable(filename: &str) -> bool {
         .to_lowercase();
     matches!(
         ext.as_str(),
-        "log" | "txt" | "conf" | "cfg" | "json" | "yaml" | "yml"
-            | "ini" | "env" | "md" | "csv" | "tsv" | "xml" | "sql"
-            | "sh" | "py" | "js" | "ts" | "go" | "rs" | "java" | "c"
-            | "cpp" | "h" | "properties" | "toml"
+        "log"
+            | "txt"
+            | "conf"
+            | "cfg"
+            | "json"
+            | "yaml"
+            | "yml"
+            | "ini"
+            | "env"
+            | "md"
+            | "csv"
+            | "tsv"
+            | "xml"
+            | "sql"
+            | "sh"
+            | "py"
+            | "js"
+            | "ts"
+            | "go"
+            | "rs"
+            | "java"
+            | "c"
+            | "cpp"
+            | "h"
+            | "properties"
+            | "toml"
     )
 }
 
-/// 将远程文件流式写入本地 dest_path（分块读写，避免大文件整块入内存导致 OOM）
-/// 通过 app.emit 周期性推送下载进度事件
+fn progress(app: Option<&AppHandle>, server_id: &str, bytes: u64, total: u64, done: bool) {
+    if let Some(app) = app {
+        let percentage = if done {
+            100
+        } else {
+            (bytes.saturating_mul(100) / total.max(1)).min(99)
+        };
+        let _ = app.emit(
+            events::SFTP_PROGRESS,
+            json!({"serverId":server_id,"progress":percentage,"bytes":bytes,"total":total}),
+        );
+    }
+}
+
+/// 下载先写同目录临时文件，完整写入后才原子替换目标。
 pub async fn download_to_file(
     sftp: &SftpSession,
-    app: &AppHandle,
+    app: Option<&AppHandle>,
     server_id: &str,
     path: &str,
     dest_path: &str,
@@ -283,119 +272,174 @@ pub async fn download_to_file(
     let stat = sftp
         .metadata(path)
         .await
-        .map_err(|e| format!("获取文件信息失败: {}", e))?;
-
-    let size = stat.len();
+        .map_err(|e| format!("获取文件信息失败: {e}"))?;
     if stat.file_type().is_dir() {
         return Err("这是目录，不是文件".into());
     }
-    if size > 200 * 1024 * 1024 {
-        return Err(format!("文件 {} MB 超过下载上限 200MB", size / 1024 / 1024));
-    }
-
-    let mut remote = sftp
-        .open(path)
-        .await
-        .map_err(|e| format!("打开文件失败: {}", e))?;
-
-    // 本地目标文件：异步分块落盘（不在内存中缓存整文件）
-    let mut local = LocalFile::create(dest_path)
-        .await
-        .map_err(|e| format!("无法创建本地文件 {}: {}", dest_path, e))?;
-
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut written: u64 = 0;
-    let mut last_emit: u64 = 0;
-
-    loop {
-        let n = remote
-            .read(&mut buf)
+    let size = stat.len();
+    let dest = StdPath::new(dest_path);
+    let temp = dest.with_file_name(format!(".ssheasy-{}.part", uuid::Uuid::new_v4()));
+    let result = async {
+        let mut remote = sftp
+            .open(path)
             .await
-            .map_err(|e| format!("读取远程文件失败: {}", e))?;
-        if n == 0 {
-            break;
-        }
-        local
-            .write_all(&buf[..n])
+            .map_err(|e| format!("打开远程文件失败: {e}"))?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut local = options
+            .open(&temp)
             .await
-            .map_err(|e| format!("写入本地文件失败: {}", e))?;
-        written += n as u64;
-
-        // 每写入约 512KB 推送一次进度（节流，避免事件洪泛）
-        if written - last_emit >= 512 * 1024 || written == size {
-            last_emit = written;
-            let pct = if size > 0 {
-                (written * 100 / size) as u8
-            } else {
-                100
-            };
-            let _ = app.emit(
-                events::SFTP_PROGRESS,
-                json!({
-                    "serverId": server_id,
-                    "progress": pct,
-                    "bytes": written,
-                    "total": size,
-                }),
-            );
+            .map_err(|e| format!("无法创建下载文件: {e}"))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut written = 0u64;
+        let mut last_emit = 0u64;
+        loop {
+            let n = remote
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("读取远程文件失败: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            local
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| format!("写入本地文件失败: {e}"))?;
+            written += n as u64;
+            if written - last_emit >= 512 * 1024 {
+                last_emit = written;
+                progress(app, server_id, written, size, false);
+            }
         }
+        if written != size {
+            return Err("远程文件大小在下载过程中发生变化，请重试".into());
+        }
+        local.flush().await.map_err(|e| e.to_string())?;
+        local.sync_all().await.map_err(|e| e.to_string())?;
+        drop(local);
+        remote.shutdown().await.map_err(|e| e.to_string())?;
+        tokio::fs::rename(&temp, dest)
+            .await
+            .map_err(|e| format!("保存下载文件失败: {e}"))?;
+        progress(app, server_id, written, size, true);
+        Ok(written)
     }
-    local
-        .flush()
-        .await
-        .map_err(|e| format!("写入本地文件失败: {}", e))?;
-
-    // 结束再补发一次 100%
-    let _ = app.emit(
-        events::SFTP_PROGRESS,
-        json!({
-            "serverId": server_id,
-            "progress": 100u8,
-            "bytes": written,
-            "total": size,
-        }),
-    );
-
-    Ok(written)
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&temp).await;
+    }
+    result
 }
 
-/// 上传本地文件到远程路径（base64 解码写入）
-/// 限制 200MB
-/// overwrite=false 时若远程已存在同名文件，返回 "FILE_EXISTS" 由前端确认后重试
-pub async fn write_file_base64(
+/// 上传先完成临时文件，再移动到目标；覆盖时保留旧文件直到新文件就绪。
+pub async fn upload_from_file(
     sftp: &SftpSession,
+    app: Option<&AppHandle>,
+    server_id: &str,
     remote_path: &str,
-    content_base64: &str,
+    local_path: &str,
     overwrite: bool,
-) -> Result<(), String> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(content_base64)
-        .map_err(|e| format!("base64 解码失败: {}", e))?;
-
-    if bytes.len() > 200 * 1024 * 1024 {
-        return Err(format!("文件 {} MB 超过上传上限 200MB", bytes.len() / 1024 / 1024));
+) -> Result<u64, String> {
+    use russh_sftp::protocol::{FileAttributes, OpenFlags};
+    let mut local = LocalFile::open(local_path)
+        .await
+        .map_err(|e| format!("打开本地文件失败: {e}"))?;
+    let meta = local.metadata().await.map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("请选择普通文件".into());
     }
-
-    // 非覆盖模式：先检查是否存在，存在则报错让前端弹确认框
-    if !overwrite {
-        if sftp.metadata(remote_path).await.is_ok() {
-            return Err("FILE_EXISTS".into());
+    let existing = sftp.symlink_metadata(remote_path).await.ok();
+    if existing.is_some() && !overwrite {
+        return Err("FILE_EXISTS".into());
+    }
+    if existing
+        .as_ref()
+        .is_some_and(|m| m.file_type().is_dir() || m.file_type().is_symlink())
+    {
+        return Err("不能覆盖目录或符号链接".into());
+    }
+    let temp = format!(
+        "{}/.ssheasy-{}.part",
+        parent_of(remote_path).trim_end_matches('/'),
+        uuid::Uuid::new_v4()
+    );
+    let size = meta.len();
+    let result = async {
+        let mut attrs = FileAttributes::empty();
+        attrs.permissions = Some(0o600);
+        let mut remote = sftp
+            .open_with_flags_and_attributes(
+                &temp,
+                OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE,
+                attrs,
+            )
+            .await
+            .map_err(|e| format!("创建远程临时文件失败: {e}"))?;
+        let mut buf = vec![0; 64 * 1024];
+        let mut written = 0u64;
+        let mut last_emit = 0u64;
+        loop {
+            let n = local
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("读取本地文件失败: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            remote
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| format!("上传失败: {e}"))?;
+            written += n as u64;
+            if written - last_emit >= 512 * 1024 {
+                last_emit = written;
+                progress(app, server_id, written, size, false);
+            }
         }
+        if written != size {
+            return Err("本地文件大小在上传过程中发生变化，请重试".into());
+        }
+        remote.flush().await.map_err(|e| e.to_string())?;
+        remote.shutdown().await.map_err(|e| e.to_string())?;
+        if let Some(metadata) = &existing {
+            let mut attrs = FileAttributes::empty();
+            attrs.permissions = metadata.permissions;
+            sftp.set_metadata(&temp, attrs)
+                .await
+                .map_err(|e| format!("保留文件权限失败: {e}"))?;
+        }
+        let backup = format!(
+            "{}/.ssheasy-{}.backup",
+            parent_of(remote_path).trim_end_matches('/'),
+            uuid::Uuid::new_v4()
+        );
+        let backed_up = overwrite && sftp.symlink_metadata(remote_path).await.is_ok();
+        if backed_up {
+            sftp.rename(remote_path, &backup)
+                .await
+                .map_err(|e| format!("备份旧文件失败: {e}"))?;
+        }
+        if let Err(e) = sftp.rename(&temp, remote_path).await {
+            if backed_up && sftp.rename(&backup, remote_path).await.is_err() {
+                return Err(format!("替换失败: {e}；旧文件保留在 {backup}"));
+            }
+            return Err(format!("保存远程文件失败: {e}"));
+        }
+        if backed_up {
+            sftp.remove_file(&backup)
+                .await
+                .map_err(|e| format!("上传已完成，旧文件备份 {backup} 清理失败: {e}"))?;
+        }
+        progress(app, server_id, written, size, true);
+        Ok(written)
     }
-
-    let mut file = sftp
-        .create(remote_path)
-        .await
-        .map_err(|e| format!("创建远程文件失败: {}", e))?;
-    file.write_all(&bytes)
-        .await
-        .map_err(|e| format!("写入文件失败: {}", e))?;
-    file.flush()
-        .await
-        .map_err(|e| format!("写入文件失败: {}", e))?;
-    drop(file);
-    Ok(())
+    .await;
+    if result.is_err() {
+        let _ = sftp.remove_file(&temp).await;
+    }
+    result
 }
 
 /// 删除远程文件
@@ -407,11 +451,12 @@ pub async fn delete_file(sftp: &SftpSession, path: &str) -> Result<(), String> {
 
 /// 删除远程路径：文件直接删；目录递归删除其全部内容与自身
 pub async fn remove_path(sftp: &SftpSession, path: &str) -> Result<(), String> {
+    validate_remove_path(path)?;
     let stat = sftp
-        .metadata(path)
+        .symlink_metadata(path)
         .await
         .map_err(|e| format!("获取信息失败: {}", e))?;
-    if stat.file_type().is_dir() {
+    if stat.file_type().is_dir() && !stat.file_type().is_symlink() {
         remove_dir_recursive(sftp, path).await
     } else {
         delete_file(sftp, path).await
@@ -427,6 +472,7 @@ async fn remove_dir_recursive(sftp: &SftpSession, path: &str) -> Result<(), Stri
 
     // 先收集子项（避免迭代器与异步调用互相借用）
     let mut children: Vec<(String, bool, bool)> = read_dir
+        .filter(|entry| !matches!(entry.file_name().as_str(), "." | ".."))
         .map(|e| {
             let ft = e.file_type();
             (e.path(), ft.is_dir(), ft.is_symlink())
@@ -465,11 +511,9 @@ fn parent_of(path: &str) -> String {
 /// 重命名远程文件/目录
 /// 防穿越：目标名不得含路径分隔符或 ".."，且目标必须与源在同一目录
 pub async fn rename_entry(sftp: &SftpSession, from: &str, to: &str) -> Result<(), String> {
-    if to.is_empty() || to.contains('/') || to.contains("..") || to.contains('\\') {
-        return Err("新名称不能包含路径分隔符或 ..".into());
-    }
-    if parent_of(from) != parent_of(to) {
-        return Err("重命名不能改变所在目录".into());
+    validate_rename(from, to)?;
+    if sftp.symlink_metadata(to).await.is_ok() {
+        return Err("目标名称已存在，请使用其他名称".into());
     }
     sftp.rename(from, to)
         .await
@@ -493,5 +537,62 @@ fn format_mtime(mtime: Option<u32>) -> String {
             local.format("%Y-%m-%d %H:%M").to_string()
         }
         None => "-".into(),
+    }
+}
+
+fn validate_remove_path(path: &str) -> Result<(), String> {
+    if !path.starts_with('/')
+        || path.trim_matches('/').is_empty()
+        || path.split('/').any(|p| matches!(p, "." | ".."))
+        || path.contains('\0')
+    {
+        return Err("拒绝删除根目录或不规范路径".into());
+    }
+    Ok(())
+}
+
+pub fn validate_rename(from: &str, to: &str) -> Result<(), String> {
+    let name = to.rsplit('/').next().unwrap_or("");
+    if name.is_empty()
+        || matches!(name, "." | "..")
+        || name.contains(['\\', '\0'])
+        || !from.starts_with('/')
+        || !to.starts_with('/')
+        || to.split('/').any(|p| matches!(p, "." | ".."))
+        || parent_of(from) != parent_of(to)
+    {
+        return Err("新名称不合法，且重命名不能改变所在目录".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rename_accepts_full_paths() {
+        assert!(validate_rename("/var/log/old.log", "/var/log/new.log").is_ok());
+        assert!(validate_rename("/a", "/b").is_ok());
+        assert!(validate_rename("/a", "/release..bak").is_ok());
+    }
+    #[test]
+    fn rename_rejects_traversal() {
+        for to in [
+            "/var/../b",
+            "/else/b",
+            "/var/..",
+            "/var/",
+            "/var/a\\b",
+            "/var/a\0b",
+        ] {
+            assert!(validate_rename("/var/a", to).is_err(), "{to}");
+        }
+    }
+    #[test]
+    fn deletion_rejects_root_and_dot_components() {
+        for path in ["/", "//", "/a/..", "/a/./b", "relative"] {
+            assert!(validate_remove_path(path).is_err());
+        }
+        assert!(validate_remove_path("/tmp/a").is_ok());
     }
 }
